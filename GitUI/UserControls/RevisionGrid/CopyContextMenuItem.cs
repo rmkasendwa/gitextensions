@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
-using GitCommands;
 using GitExtUtils;
 using GitExtUtils.GitUI.Theming;
 using GitUI.Properties;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 using ResourceManager;
 
@@ -63,7 +63,7 @@ namespace GitUI.UserControls.RevisionGrid
 
             var item = new ToolStripMenuItem
             {
-                Text = displayText,
+                Text = displayText.TrimEnd('\r', '\n'),
                 ShowShortcutKeys = true,
                 Image = image
             };

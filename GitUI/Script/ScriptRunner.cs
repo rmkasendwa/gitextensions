@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Windows.Forms;
 using GitCommands;
+using GitUI.HelperDialogs;
 using GitUIPluginInterfaces;
 
 namespace GitUI.Script
@@ -31,11 +32,19 @@ namespace GitUI.Script
 
         public static CommandStatus RunScript(IWin32Window owner, IGitModule module, string scriptKey, IGitUICommands uiCommands, RevisionGridControl revisionGrid)
         {
-            return RunScript(owner, module, scriptKey, uiCommands, revisionGrid,
-                msg => MessageBox.Show(owner, msg, Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error));
+            try
+            {
+                return RunScript(owner, module, scriptKey, uiCommands, revisionGrid,
+                    msg => MessageBox.Show(owner, msg, Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error));
+            }
+            catch (Exception ex)
+            {
+                MessageBoxes.FailedToExecuteScript(owner, scriptKey, ex);
+                return new CommandStatus(false, false);
+            }
         }
 
-        public static CommandStatus RunScript(IWin32Window owner, IGitModule module, string scriptKey, IGitUICommands uiCommands,
+        private static CommandStatus RunScript(IWin32Window owner, IGitModule module, string scriptKey, IGitUICommands uiCommands,
             RevisionGridControl revisionGrid, Action<string> showError)
         {
             if (string.IsNullOrEmpty(scriptKey))
@@ -43,38 +52,31 @@ namespace GitUI.Script
                 return false;
             }
 
-            var script = ScriptManager.GetScript(scriptKey);
-
-            if (script == null)
+            var scriptInfo = ScriptManager.GetScript(scriptKey);
+            if (scriptInfo is null)
             {
                 showError("Cannot find script: " + scriptKey);
                 return false;
             }
 
-            if (string.IsNullOrEmpty(script.Command))
+            if (string.IsNullOrEmpty(scriptInfo.Command))
             {
                 return false;
             }
 
-            string arguments = script.Arguments;
-            if (!string.IsNullOrEmpty(arguments) && revisionGrid == null)
+            string arguments = scriptInfo.Arguments;
+            if (!string.IsNullOrEmpty(arguments) && revisionGrid is null)
             {
                 string optionDependingOnSelectedRevision
                     = ScriptOptionsParser.Options.FirstOrDefault(option => ScriptOptionsParser.DependsOnSelectedRevision(option)
-                        && ScriptOptionsParser.Contains(arguments, option));
-                if (optionDependingOnSelectedRevision != null)
+                                                                        && ScriptOptionsParser.Contains(arguments, option));
+                if (optionDependingOnSelectedRevision is object)
                 {
                     showError($"Option {optionDependingOnSelectedRevision} is only supported when started with revision grid available.");
                     return false;
                 }
             }
 
-            return RunScript(owner, module, script, uiCommands, revisionGrid, showError);
-        }
-
-        private static CommandStatus RunScript(IWin32Window owner, IGitModule module, ScriptInfo scriptInfo, IGitUICommands uiCommands,
-            RevisionGridControl revisionGrid, Action<string> showError)
-        {
             if (scriptInfo.AskConfirmation && MessageBox.Show(owner, $"Do you want to execute '{scriptInfo.Name}'?", "Script", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No)
             {
                 return false;
@@ -121,7 +123,7 @@ namespace GitUI.Script
 
             if (command.StartsWith(NavigateToPrefix))
             {
-                if (revisionGrid == null)
+                if (revisionGrid is null)
                 {
                     return false;
                 }
@@ -142,7 +144,7 @@ namespace GitUI.Script
 
             if (!scriptInfo.RunInBackground)
             {
-                FormProcess.ShowStandardProcessDialog(owner, command, argument, module.WorkingDir, null, true);
+                FormProcess.ShowDialog(owner, command, argument, module.WorkingDir, null, true);
             }
             else
             {
@@ -152,7 +154,10 @@ namespace GitUI.Script
                 }
                 else
                 {
-                    new Executable(command, module.WorkingDir).Start(argument);
+                    // It is totally valid to have a command without an argument, e.g.:
+                    //    Command  : myscript.cmd
+                    //    Arguments: <blank>
+                    new Executable(command, module.WorkingDir).Start(argument ?? string.Empty);
                 }
             }
 

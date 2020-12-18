@@ -1,12 +1,21 @@
-﻿using System.Windows.Forms;
+﻿using System;
+using System.Windows.Forms;
 using GitCommands;
+using GitCommands.Config;
 using JetBrains.Annotations;
+using Microsoft.WindowsAPICodePack.Dialogs;
 using ResourceManager;
 
 namespace GitUI
 {
     public class MessageBoxes : Translate
     {
+        private readonly TranslationString _archiveRevisionCaption = new TranslationString("Archive revision");
+
+        private readonly TranslationString _failedToExecuteScript = new TranslationString("Failed to execute script");
+
+        private readonly TranslationString _failedToRunShell = new TranslationString("Failed to run shell");
+
         private readonly TranslationString _notValidGitDirectory = new TranslationString("The current directory is not a valid git repository.");
 
         private readonly TranslationString _unresolvedMergeConflictsCaption = new TranslationString("Merge conflicts");
@@ -28,10 +37,14 @@ namespace GitUI
         private readonly TranslationString _theRepositorySubmodules = new TranslationString("Update submodules on checkout?");
         private readonly TranslationString _updateSubmodulesToo = new TranslationString("Since this repository has submodules, it's necessary to update them on every checkout.\r\n\r\nThis will just checkout on the submodule the commit determined by the superproject.");
         private readonly TranslationString _rememberChoice = new TranslationString("Remember choice");
-        private readonly TranslationString _confirmDeleteRemoteBranch = new TranslationString("Do you want to delete the branch {0} from {1}?");
+
+        private readonly TranslationString _reason = new TranslationString("Reason");
+
+        private readonly TranslationString _selectOnlyOneOrTwoRevisions = new TranslationString("Select only one or two revisions. Abort.");
 
         private readonly TranslationString _shellNotFoundCaption = new TranslationString("Shell not found");
         private readonly TranslationString _shellNotFound = new TranslationString("The selected shell is not installed, or is not on your path.");
+        private readonly TranslationString _resetChangesCaption = new TranslationString("Reset changes");
 
         // internal for FormTranslate
         internal MessageBoxes()
@@ -43,53 +56,63 @@ namespace GitUI
 
         private static MessageBoxes Instance => instance ?? (instance = new MessageBoxes());
 
-        public static void NotValidGitDirectory([CanBeNull] IWin32Window owner)
-        {
-            MessageBox.Show(owner, Instance._notValidGitDirectory.Text, Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        public static void FailedToExecuteScript(IWin32Window owner, string scriptKey, Exception ex)
+            => ShowError(owner, $"{Instance._failedToExecuteScript.Text} {scriptKey.Quote()}.{Environment.NewLine}"
+                                + $"{Instance._reason.Text}: {ex.Message}");
 
-        public static bool UnresolvedMergeConflicts(IWin32Window owner)
-        {
-            return MessageBox.Show(owner, Instance._unresolvedMergeConflicts.Text, Instance._unresolvedMergeConflictsCaption.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
+        public static void FailedToRunShell(IWin32Window owner, string shell, Exception ex)
+            => ShowError(owner, $"{Instance._failedToRunShell.Text} {shell.Quote()}.{Environment.NewLine}"
+                                + $"{Instance._reason.Text}: {ex.Message}");
+
+        public static void NotValidGitDirectory([CanBeNull] IWin32Window owner)
+            => ShowError(owner, Instance._notValidGitDirectory.Text);
+
+        public static void ShowGitConfigurationExceptionMessage(IWin32Window owner, GitConfigurationException exception)
+            => Show(owner,
+                    string.Format(ResourceManager.Strings.GeneralGitConfigExceptionMessage,
+                                  exception.ConfigPath, Environment.NewLine, (exception.InnerException ?? exception).Message),
+                    ResourceManager.Strings.GeneralGitConfigExceptionCaption,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
 
         public static bool MiddleOfRebase(IWin32Window owner)
-        {
-            return MessageBox.Show(owner, Instance._middleOfRebase.Text, Instance._middleOfRebaseCaption.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
+            => Confirm(owner, Instance._middleOfRebase.Text, Instance._middleOfRebaseCaption.Text);
 
         public static bool MiddleOfPatchApply(IWin32Window owner)
-        {
-            return MessageBox.Show(owner, Instance._middleOfPatchApply.Text, Instance._middleOfPatchApplyCaption.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
+            => Confirm(owner, Instance._middleOfPatchApply.Text, Instance._middleOfPatchApplyCaption.Text);
 
         public static void PAgentNotFound(IWin32Window owner)
-        {
-            MessageBox.Show(owner, Instance._pageantNotFound.Text, _putty, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+            => ShowError(owner, Instance._pageantNotFound.Text, _putty);
+
+        public static void SelectOnlyOneOrTwoRevisions(IWin32Window owner)
+            => ShowError(owner, Instance._selectOnlyOneOrTwoRevisions.Text, Instance._archiveRevisionCaption.Text);
 
         public static bool CacheHostkey(IWin32Window owner)
-        {
-            return MessageBox.Show(owner, Instance._serverHostkeyNotCachedText.Text, "SSH", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
+            => Confirm(owner, Instance._serverHostkeyNotCachedText.Text, "SSH");
+
+        public static bool ConfirmResetSelectedFiles(IWin32Window owner, string text)
+            => Confirm(owner, text, Instance._resetChangesCaption.Text);
+
+        public static bool ConfirmResolveMergeConflicts(IWin32Window owner)
+            => Confirm(owner, Instance._unresolvedMergeConflicts.Text, Instance._unresolvedMergeConflictsCaption.Text);
 
         public static bool ConfirmUpdateSubmodules(IWin32Window win)
         {
-            var result = PSTaskDialog.cTaskDialog.ShowTaskDialogBox(
-                Owner: win,
-                Title: Instance._updateSubmodules.Text,
-                MainInstruction: Instance._theRepositorySubmodules.Text,
-                Content: Instance._updateSubmodulesToo.Text,
-                ExpandedInfo: "",
-                Footer: "",
-                VerificationText: Instance._rememberChoice.Text,
-                RadioButtons: "",
-                CommandButtons: "",
-                Buttons: PSTaskDialog.eTaskDialogButtons.YesNo,
-                MainIcon: PSTaskDialog.eSysIcons.Question,
-                FooterIcon: PSTaskDialog.eSysIcons.Information) == DialogResult.Yes;
+            using var dialog = new TaskDialog
+            {
+                OwnerWindowHandle = win.Handle,
+                Text = Instance._updateSubmodulesToo.Text,
+                InstructionText = Instance._theRepositorySubmodules.Text,
+                Caption = Instance._updateSubmodules.Text,
+                Icon = TaskDialogStandardIcon.Information,
+                StandardButtons = TaskDialogStandardButtons.Yes | TaskDialogStandardButtons.No,
+                FooterCheckBoxText = Instance._rememberChoice.Text,
+                FooterIcon = TaskDialogStandardIcon.Information,
+                StartupLocation = TaskDialogStartupLocation.CenterOwner
+            };
 
-            if (PSTaskDialog.cTaskDialog.VerificationChecked)
+            bool result = dialog.Show() == TaskDialogResult.Yes;
+            if (dialog.FooterCheckBoxChecked == true)
             {
                 AppSettings.DontConfirmUpdateSubmodulesOnCheckout = result;
                 AppSettings.UpdateSubmodulesOnCheckout = result;
@@ -98,15 +121,16 @@ namespace GitUI
             return result;
         }
 
-        public static bool ConfirmDeleteRemoteBranch(IWin32Window owner, string branchName, string remote)
-        {
-            return MessageBox.Show(owner, string.Format(Instance._confirmDeleteRemoteBranch.Text, branchName, remote),
-                "", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
-
         public static void ShellNotFound([CanBeNull] IWin32Window owner)
-        {
-            MessageBox.Show(owner, Instance._shellNotFound.Text, Instance._shellNotFoundCaption.Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+            => ShowError(owner, Instance._shellNotFound.Text, Instance._shellNotFoundCaption.Text);
+
+        public static void ShowError([CanBeNull] IWin32Window owner, string text, string caption = null)
+            => Show(owner, text, caption ?? Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+        private static bool Confirm([CanBeNull] IWin32Window owner, string text, string caption)
+            => Show(owner, text, caption, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+
+        private static DialogResult Show([CanBeNull] IWin32Window owner, string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+            => MessageBox.Show(owner, text, caption, buttons, icon);
     }
 }

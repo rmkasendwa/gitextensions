@@ -7,9 +7,10 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using GitCommands;
 using GitCommands.Git;
+using GitCommands.Git.Commands;
 using GitCommands.UserRepositoryHistory;
 using GitExtUtils.GitUI;
-using GitUI.UserControls;
+using GitUI.HelperDialogs;
 using GitUIPluginInterfaces.RepositoryHosts;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.Threading;
@@ -390,7 +391,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
 
             var cmd = GitCommandHelpers.CloneCmd(repoSrc, targetDir, depth: GetDepth());
 
-            var formRemoteProcess = new FormRemoteProcess(new GitModule(null), AppSettings.GitCommand, cmd)
+            var formRemoteProcess = new FormRemoteProcess(new GitUICommands(new GitModule(null)), AppSettings.GitCommand, cmd)
             {
                 Remote = repoSrc
             };

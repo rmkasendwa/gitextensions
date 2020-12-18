@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 
 namespace GitCommands
@@ -69,6 +70,23 @@ namespace GitCommands
             }
 
             return string.Empty;
+        }
+
+        [Pure, NotNull]
+        public static string GetRemoteBranch([NotNull] string refName)
+        {
+            if (refName.Length <= GitRefName.RefsRemotesPrefix.Length)
+            {
+                return string.Empty;
+            }
+
+            var startBranch = refName.IndexOf('/', GitRefName.RefsRemotesPrefix.Length);
+            if (startBranch < 0)
+            {
+                return string.Empty;
+            }
+
+            return refName.Substring(1 + startBranch);
         }
 
         [Pure, CanBeNull]

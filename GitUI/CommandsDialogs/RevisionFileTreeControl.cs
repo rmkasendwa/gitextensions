@@ -14,6 +14,7 @@ using GitExtUtils.GitUI;
 using GitUI.CommandsDialogs.BrowseDialog;
 using GitUI.Hotkey;
 using GitUI.Properties;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 using ResourceManager;
 
@@ -52,6 +53,8 @@ See the changes in the commit form.");
         private readonly IFullPathResolver _fullPathResolver;
         private readonly IFindFilePredicateProvider _findFilePredicateProvider;
         [CanBeNull] private GitRevision _revision;
+        private readonly RememberFileContextMenuController _rememberFileContextMenuController
+            = RememberFileContextMenuController.Default;
 
         public RevisionFileTreeControl()
         {
@@ -370,7 +373,7 @@ See the changes in the commit form.");
                         var file = new GitItemStatus
                         {
                             IsTracked = true,
-                            Name = gitItem.Name,
+                            Name = gitItem.FileName,
                             TreeGuid = gitItem.ObjectId,
                             IsSubmodule = gitItem.ObjectType == GitObjectType.Commit
                         };
@@ -550,51 +553,79 @@ See the changes in the commit form.");
             var isFile = itemSelected && gitItem.ObjectType == GitObjectType.Blob;
             var isFolder = itemSelected && gitItem.ObjectType == GitObjectType.Tree;
             var isFileOrFolder = isFile || isFolder;
+
+            // Many items does not make sense if a local file does not exist, why this is used for Enabled
             var isExistingFileOrDirectory = itemSelected && FormBrowseUtil.IsFileOrDirectory(_fullPathResolver.Resolve(gitItem.FileName));
 
-            if (itemSelected && gitItem.ObjectType == GitObjectType.Commit)
+            var openSubVisible = itemSelected && gitItem.ObjectType == GitObjectType.Commit && isExistingFileOrDirectory;
+            openSubmoduleMenuItem.Visible = openSubVisible;
+            if (openSubVisible)
             {
-                openSubmoduleMenuItem.Visible = true;
                 if (!openSubmoduleMenuItem.Font.Bold)
                 {
                     openSubmoduleMenuItem.Font = new Font(openSubmoduleMenuItem.Font, FontStyle.Bold);
                 }
+
+                if (fileHistoryToolStripMenuItem.Font.Bold)
+                {
+                    fileHistoryToolStripMenuItem.Font = new Font(fileHistoryToolStripMenuItem.Font, FontStyle.Regular);
+                }
             }
-            else
+            else if (!fileHistoryToolStripMenuItem.Font.Bold)
             {
-                openSubmoduleMenuItem.Visible = false;
+                fileHistoryToolStripMenuItem.Font = new Font(fileHistoryToolStripMenuItem.Font, FontStyle.Bold);
             }
 
+            // Diff with workTree (some tools like kdiff3 and meld allows diff to NUL)
+            resetToThisRevisionToolStripMenuItem.Visible = itemSelected && !Module.IsBareRepository();
+            toolStripSeparatorTopActions.Visible = itemSelected && ((gitItem.ObjectType == GitObjectType.Commit && isExistingFileOrDirectory)
+                                                                    || !Module.IsBareRepository());
+
+            // RememberFile diff can be done for folders too (as well as for submodules, but that is meaningless)
+            // However diffs will open many windows that cannot be aborted, so it is blocked
+            // Another reason is that file<->folder compare is not giving any result
+            // (and diff is shared with Diff tab that has no notion of folders)
+            openWithDifftoolToolStripMenuItem.Visible = isFile;
+            openWithToolStripMenuItem.Visible = isFile;
+            openWithToolStripMenuItem.Enabled = isExistingFileOrDirectory;
+            var fsi = _rememberFileContextMenuController.CreateFileStatusItem(gitItem?.FileName, _revision);
+            diffWithRememberedFileToolStripMenuItem.Visible = _rememberFileContextMenuController.RememberedDiffFileItem != null;
+            diffWithRememberedFileToolStripMenuItem.Enabled = isFile && fsi != _rememberFileContextMenuController.RememberedDiffFileItem
+                                                                         && _rememberFileContextMenuController.ShouldEnableSecondItemDiff(fsi);
+            diffWithRememberedFileToolStripMenuItem.Text =
+                _rememberFileContextMenuController.RememberedDiffFileItem != null
+                    ? string.Format(Strings.DiffSelectedWithRememberedFile, _rememberFileContextMenuController.RememberedDiffFileItem.Item.Name)
+                    : string.Empty;
+
+            rememberFileStripMenuItem.Visible = isFile;
+            rememberFileStripMenuItem.Enabled = _rememberFileContextMenuController.ShouldEnableFirstItemDiff(fsi, isSecondRevision: true);
+
+            openFileToolStripMenuItem.Visible = isFile;
+            openFileWithToolStripMenuItem.Visible = isFile;
             saveAsToolStripMenuItem.Visible = isFile;
-            resetToThisRevisionToolStripMenuItem.Visible = isFileOrFolder && !Module.IsBareRepository();
-            toolStripSeparatorFileSystemActions.Visible = isFileOrFolder;
+            editCheckedOutFileToolStripMenuItem.Visible = isFile;
+            editCheckedOutFileToolStripMenuItem.Enabled = isExistingFileOrDirectory;
+            toolStripSeparatorFileSystemActions.Visible = isFile;
 
             copyFilenameToClipboardToolStripMenuItem.Visible = itemSelected;
+            fileTreeOpenContainingFolderToolStripMenuItem.Visible = itemSelected;
             fileTreeOpenContainingFolderToolStripMenuItem.Enabled = isExistingFileOrDirectory;
-            fileTreeArchiveToolStripMenuItem.Enabled = itemSelected;
-            fileTreeCleanWorkingTreeToolStripMenuItem.Visible = isFileOrFolder;
-            fileTreeCleanWorkingTreeToolStripMenuItem.Enabled = isExistingFileOrDirectory;
+            toolStripSeparatorFileNameActions.Visible = itemSelected;
 
             fileHistoryToolStripMenuItem.Enabled = itemSelected;
             blameToolStripMenuItem1.Visible = isFile;
+            fileTreeArchiveToolStripMenuItem.Enabled = itemSelected;
+            fileTreeCleanWorkingTreeToolStripMenuItem.Visible = isFileOrFolder;
+            fileTreeCleanWorkingTreeToolStripMenuItem.Enabled = isExistingFileOrDirectory;
+            toolStripSeparatorGitActions.Visible = itemSelected;
 
-            editCheckedOutFileToolStripMenuItem.Visible = isFile;
-            editCheckedOutFileToolStripMenuItem.Enabled = isExistingFileOrDirectory;
-            openWithToolStripMenuItem.Visible = isFile;
-            openWithToolStripMenuItem.Enabled = isExistingFileOrDirectory;
-            openWithDifftoolToolStripMenuItem.Visible = isFile;
-            openWithDifftoolToolStripMenuItem.Enabled = isExistingFileOrDirectory;
-            openFileToolStripMenuItem.Visible = isFile;
-            openFileWithToolStripMenuItem.Visible = isFile;
-
-            toolStripSeparatorGitActions.Visible = isFile;
             stopTrackingThisFileToolStripMenuItem.Visible = isFile;
             stopTrackingThisFileToolStripMenuItem.Enabled = isExistingFileOrDirectory;
             assumeUnchangedTheFileToolStripMenuItem.Visible = isFile;
             assumeUnchangedTheFileToolStripMenuItem.Enabled = isExistingFileOrDirectory;
-            findToolStripMenuItem.Enabled = tvGitTree.Nodes.Count > 0;
+            toolStripSeparatorGitTrackingActions.Visible = isFile;
 
-            toolStripSeparatorFileTreeActions.Visible = isFile;
+            findToolStripMenuItem.Enabled = tvGitTree.Nodes.Count > 0;
             expandSubtreeToolStripMenuItem.Visible = isFolder;
         }
 
@@ -644,7 +675,10 @@ See the changes in the commit form.");
             if (tvGitTree.SelectedNode?.Tag is GitItem gitItem && gitItem.ObjectType == GitObjectType.Blob)
             {
                 var fileName = _fullPathResolver.Resolve(gitItem.FileName);
-                OsShellUtil.OpenAs(fileName.ToNativePath());
+                if (File.Exists(fileName))
+                {
+                    OsShellUtil.OpenAs(fileName.ToNativePath());
+                }
             }
         }
 
@@ -652,8 +686,34 @@ See the changes in the commit form.");
         {
             if (tvGitTree.SelectedNode?.Tag is GitItem gitItem)
             {
-                Module.OpenWithDifftool(gitItem.Name, null, _revision?.ObjectId?.ToString());
+                Module.OpenWithDifftool(gitItem.FileName, firstRevision: _revision?.ObjectId?.ToString());
             }
+        }
+
+        private void diffWithRememberedFileToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (!(tvGitTree.SelectedNode?.Tag is GitItem gitItem) || _revision == null)
+            {
+                return;
+            }
+
+            var fsi = _rememberFileContextMenuController.CreateFileStatusItem(gitItem.FileName, _revision);
+            var first = _rememberFileContextMenuController.GetGitCommit(Module.GetFileBlobHash,
+                _rememberFileContextMenuController.RememberedDiffFileItem, isSecondRevision: true);
+            var second = _rememberFileContextMenuController.GetGitCommit(Module.GetFileBlobHash, fsi, isSecondRevision: true);
+
+            Module.OpenFilesWithDifftool(first, second);
+        }
+
+        private void rememberFileToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (!(tvGitTree.SelectedNode?.Tag is GitItem gitItem) || _revision == null)
+            {
+                return;
+            }
+
+            var fsi = _rememberFileContextMenuController.CreateFileStatusItem(gitItem.FileName, _revision);
+            _rememberFileContextMenuController.RememberedDiffFileItem = fsi;
         }
 
         private void resetToThisRevisionToolStripMenuItem_Click(object sender, EventArgs e)

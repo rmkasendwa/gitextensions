@@ -13,6 +13,7 @@ using GitUI.Infrastructure.Telemetry;
 using GitUI.Theming;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.Threading;
+using Microsoft.WindowsAPICodePack.Dialogs;
 using ResourceManager;
 
 namespace GitExtensions
@@ -160,7 +161,14 @@ namespace GitExtensions
             else
             {
                 // if we are here args.Length > 1
-                commands.RunCommand(args);
+
+                // Avoid replacing the ExitCode eventually set while parsing arguments,
+                // i.e. assume -1 and afterwards, only set it to 0 if no error is indicated.
+                Environment.ExitCode = -1;
+                if (commands.RunCommand(args))
+                {
+                    Environment.ExitCode = 0;
+                }
             }
 
             AppSettings.SaveSettings();
@@ -288,16 +296,31 @@ namespace GitExtensions
 
         private static bool LocateMissingGit()
         {
-            int dialogResult = PSTaskDialog.cTaskDialog.ShowCommandBox(Title: "Error",
-                                                                        MainInstruction: ResourceManager.Strings.GitExecutableNotFound,
-                                                                        Content: null,
-                                                                        ExpandedInfo: null,
-                                                                        Footer: null,
-                                                                        VerificationText: null,
-                                                                        CommandButtons: $"{ResourceManager.Strings.FindGitExecutable}|{ResourceManager.Strings.InstallGitInstructions}",
-                                                                        ShowCancelButton: true,
-                                                                        MainIcon: PSTaskDialog.eSysIcons.Error,
-                                                                        FooterIcon: PSTaskDialog.eSysIcons.Warning);
+            int dialogResult = -1;
+
+            using var dialog1 = new TaskDialog
+            {
+                InstructionText = ResourceManager.Strings.GitExecutableNotFound,
+                Icon = TaskDialogStandardIcon.Error,
+                StandardButtons = TaskDialogStandardButtons.Cancel,
+                Cancelable = true,
+            };
+            var btnFindGitExecutable = new TaskDialogCommandLink("FindGitExecutable", null, ResourceManager.Strings.FindGitExecutable);
+            btnFindGitExecutable.Click += (s, e) =>
+            {
+                dialogResult = 0;
+                dialog1.Close();
+            };
+            var btnInstallGitInstructions = new TaskDialogCommandLink("InstallGitInstructions", null, ResourceManager.Strings.InstallGitInstructions);
+            btnInstallGitInstructions.Click += (s, e) =>
+            {
+                dialogResult = 1;
+                dialog1.Close();
+            };
+            dialog1.Controls.Add(btnFindGitExecutable);
+            dialog1.Controls.Add(btnInstallGitInstructions);
+
+            dialog1.Show();
             switch (dialogResult)
             {
                 case 0:

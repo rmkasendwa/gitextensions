@@ -300,23 +300,26 @@ namespace GitUI.CommandsDialogs.BrowseDialog.DashboardControl
 
             void BindRepositories(IReadOnlyList<RecentRepoInfo> repos, bool isFavourite)
             {
-                foreach (var repository in repos)
-                {
-                    var isInvalidRepo = !_controller.IsValidGitWorkingDir(repository.Repo.Path);
-                    _hasInvalidRepos |= isInvalidRepo;
+                var repoValidityArray = repos.AsParallel().Select(r => !_controller.IsValidGitWorkingDir(r.Repo.Path)).ToArray();
 
-                    listView1.Items.Add(new ListViewItem(repository.Caption)
+                _hasInvalidRepos = repoValidityArray.Any();
+
+                for (var index = 0; index < repos.Count; index++)
+                {
+                    listView1.Items.Add(new ListViewItem(repos[index].Caption)
                     {
                         ForeColor = ForeColor,
                         Font = AppSettings.Font,
-                        Group = isFavourite ? GetTileGroup(repository.Repo) : _lvgRecentRepositories,
-                        ImageIndex = isInvalidRepo ? 1 : 0,
+                        Group = isFavourite ? GetTileGroup(repos[index].Repo) : _lvgRecentRepositories,
+                        ImageIndex = repoValidityArray[index] ? 1 : 0,
                         UseItemStyleForSubItems = false,
-                        Tag = repository.Repo,
-                        ToolTipText = repository.Repo.Path,
+                        Tag = repos[index].Repo,
+                        ToolTipText = repos[index].Repo.Path,
                         SubItems =
                         {
-                            { _controller.GetCurrentBranchName(repository.Repo.Path), BranchNameColor, BackColor, _secondaryFont },
+                            {
+                                _controller.GetCurrentBranchName(repos[index].Repo.Path), BranchNameColor, BackColor, _secondaryFont
+                            },
                             //// NB: we can add a 3rd row as well: { repository.Repo.Category, SystemColors.GrayText, BackColor, _secondaryFont }
                         }
                     });
@@ -328,6 +331,20 @@ namespace GitUI.CommandsDialogs.BrowseDialog.DashboardControl
         {
             var handler = GitModuleChanged;
             handler?.Invoke(this, args);
+        }
+
+        protected override bool ProcessDialogKey(Keys keyData)
+        {
+            if (keyData == Keys.Enter)
+            {
+                // .NET 5.0 introduced collapsible `ListViewGoup`s, which we do not yet have API access to but still get rendered in the UI.
+                // Whenever the list of repos is collapsed but we still have a repo selected (and hidden), if we hit enter, the selected repo will
+                // be opened. This should be a no-op instead, however, since we cannot visually tell what repo is selected. When we upgrade
+                // to .NET 5.0, we can check ListViewGroup.CollapsedState to fix this issue.
+                return TryOpenSelectedRepository();
+            }
+
+            return base.ProcessDialogKey(keyData);
         }
 
         private List<string> GetCategories()
@@ -587,31 +604,11 @@ namespace GitUI.CommandsDialogs.BrowseDialog.DashboardControl
         {
             if (e.Button == MouseButtons.Left)
             {
-                var selected = GetSelectedRepository();
-                if (selected == null)
-                {
-                    return;
-                }
-
-                if (_controller.IsValidGitWorkingDir(selected.Path))
-                {
-                    OnModuleChanged(new GitModuleEventArgs(new GitModule(selected.Path)));
-                    return;
-                }
-
-                if (_controller.RemoveInvalidRepository(selected.Path))
-                {
-                    ShowRecentRepositories();
-                    return;
-                }
+                TryOpenSelectedRepository();
             }
             else if (e.Button == MouseButtons.Right)
             {
-                // translate the mouse position from screen coordinates to
-                // client coordinates within the given ListView
-                Point localPoint = listView1.PointToClient(Cursor.Position);
-                _rightClickedItem = listView1.GetItemAt(localPoint.X, localPoint.Y);
-
+                _rightClickedItem = listView1.GetItemAt(e.X, e.Y);
                 if (_rightClickedItem != null)
                 {
                     _rightClickedItem.Selected = true;
@@ -665,7 +662,7 @@ namespace GitUI.CommandsDialogs.BrowseDialog.DashboardControl
             }
 
             var menus = new ToolStripItem[] { mnuConfigure };
-            var menuStrip = form.FindDescendantOfType<MenuStrip>(p => p.Name == "menuStrip1");
+            var menuStrip = form.FindDescendantOfType<MenuStrip>(p => p.Name == "mainMenuStrip");
             var dashboardMenu = (ToolStripMenuItem)menuStrip.Items.Cast<ToolStripItem>().SingleOrDefault(p => p.Name == "dashboardToolStripMenuItem");
             dashboardMenu?.DropDownItems.AddRange(menus);
         }
@@ -865,6 +862,30 @@ namespace GitUI.CommandsDialogs.BrowseDialog.DashboardControl
                     e.Effect = DragDropEffects.Copy;
                 }
             }
+        }
+
+        // returns false only if no repository is selected
+        private bool TryOpenSelectedRepository()
+        {
+            var selected = GetSelectedRepository();
+            if (selected == null)
+            {
+                return false;
+            }
+
+            if (_controller.IsValidGitWorkingDir(selected.Path))
+            {
+                OnModuleChanged(new GitModuleEventArgs(new GitModule(selected.Path)));
+                return true;
+            }
+
+            if (_controller.RemoveInvalidRepository(selected.Path))
+            {
+                ShowRecentRepositories();
+                return true;
+            }
+
+            return true;
         }
     }
 }

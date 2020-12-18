@@ -124,6 +124,8 @@ namespace GitCommands
 
         public bool IsDereference { get; }
 
+        public bool IsOther => !IsHead && !IsRemote && !IsTag;
+
         public string LocalName => IsRemote ? Name.Substring(Remote.Length + 1) : Name;
 
         public string Remote { get; }
@@ -201,6 +203,16 @@ namespace GitCommands
                 .GroupBy(r => r.Name)
                 .Where(group => group.Count() > 1)
                 .ToHashSet(e => e.Key);
+        }
+
+        public bool IsTrackingRemote(IGitRef remote)
+        {
+            if (remote == null || IsRemote || !remote.IsRemote)
+            {
+                return false;
+            }
+
+            return MergeWith == remote.LocalName && TrackingRemote == remote.Remote;
         }
     }
 }

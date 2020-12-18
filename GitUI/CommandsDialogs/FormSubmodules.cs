@@ -3,9 +3,12 @@ using System.ComponentModel;
 using System.Linq;
 using System.Windows.Forms;
 using GitCommands;
+using GitCommands.Config;
+using GitCommands.Git.Commands;
 using GitExtUtils.GitUI;
 using GitExtUtils.GitUI.Theming;
 using GitUI.CommandsDialogs.SubmodulesDialog;
+using GitUI.HelperDialogs;
 using GitUIPluginInterfaces;
 using ResourceManager;
 
@@ -13,6 +16,7 @@ namespace GitUI.CommandsDialogs
 {
     public partial class FormSubmodules : GitModuleForm
     {
+        private readonly SplitterManager _splitterManager = new SplitterManager(new AppSettingsPath("FormSubmodules"));
         private readonly TranslationString _removeSelectedSubmodule = new TranslationString("Are you sure you want remove the selected submodule?");
         private readonly TranslationString _removeSelectedSubmoduleCaption = new TranslationString("Remove");
 
@@ -36,6 +40,19 @@ namespace GitUI.CommandsDialogs
             splitContainer1.SplitterDistance = DpiUtil.Scale(222);
             Pull.AdaptImageLightness();
             InitializeComplete();
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            _splitterManager.AddSplitter(splitContainer1, nameof(splitContainer1));
+            _splitterManager.RestoreSplitters();
+            base.OnLoad(e);
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            _splitterManager.SaveSplitters();
+            base.OnClosing(e);
         }
 
         private void AddSubmoduleClick(object sender, EventArgs e)
@@ -77,7 +94,7 @@ namespace GitUI.CommandsDialogs
             };
             _bw.DoWork += (sender, e) =>
             {
-                foreach (var oldSubmodule in Module.GetSubmodulesInfo())
+                foreach (var oldSubmodule in Module.GetSubmodulesInfo().Where(submodule => submodule != null))
                 {
                     if (_bw.CancellationPending)
                     {
@@ -118,7 +135,7 @@ namespace GitUI.CommandsDialogs
         {
             using (WaitCursorScope.Enter())
             {
-                FormProcess.ShowDialog(this, GitCommandHelpers.SubmoduleSyncCmd(SubModuleLocalPath.Text));
+                FormProcess.ShowDialog(this, process: null, arguments: GitCommandHelpers.SubmoduleSyncCmd(SubModuleLocalPath.Text), Module.WorkingDir, input: null, useDialogSettings: true);
                 Initialize();
             }
         }
@@ -127,7 +144,7 @@ namespace GitUI.CommandsDialogs
         {
             using (WaitCursorScope.Enter())
             {
-                FormProcess.ShowDialog(this, GitCommandHelpers.SubmoduleUpdateCmd(SubModuleLocalPath.Text));
+                FormProcess.ShowDialog(this, process: null, arguments: GitCommandHelpers.SubmoduleUpdateCmd(SubModuleLocalPath.Text), Module.WorkingDir, input: null, useDialogSettings: true);
                 Initialize();
             }
         }
@@ -146,11 +163,21 @@ namespace GitUI.CommandsDialogs
             {
                 Module.UnstageFile(SubModuleLocalPath.Text);
 
-                var modules = Module.GetSubmoduleConfigFile();
-                modules.RemoveConfigSection("submodule \"" + SubModuleName.Text + "\"");
-                if (modules.ConfigSections.Count > 0)
+                ConfigFile submoduleConfigFile;
+                try
                 {
-                    modules.Save();
+                    submoduleConfigFile = Module.GetSubmoduleConfigFile();
+                }
+                catch (GitConfigurationException ex)
+                {
+                    MessageBoxes.ShowGitConfigurationExceptionMessage(this, ex);
+                    return;
+                }
+
+                submoduleConfigFile.RemoveConfigSection("submodule \"" + SubModuleName.Text + "\"");
+                if (submoduleConfigFile.ConfigSections.Count > 0)
+                {
+                    submoduleConfigFile.Save();
                     Module.StageFile(".gitmodules");
                 }
                 else

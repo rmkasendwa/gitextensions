@@ -2,8 +2,10 @@
 using System.Drawing;
 using System.Windows.Forms;
 using GitCommands;
+using GitCommands.Git.Commands;
 using GitExtUtils;
 using GitUI.HelperDialogs;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 using ResourceManager;
 
@@ -120,7 +122,12 @@ namespace GitUI.CommandsDialogs
 
             if (canExecute)
             {
-                FormProcess.ShowDialog(this, GitCommandHelpers.CherryPickCmd(Revision.ObjectId, AutoCommit.Checked, args.ToString()));
+                var command = GitCommandHelpers.CherryPickCmd(Revision.ObjectId, AutoCommit.Checked, args.ToString());
+
+                // Don't verify whether the command is successful.
+                // If it fails, likely there is a conflict that needs to be resolved.
+                FormProcess.ShowDialog(this, process: null, arguments: command, Module.WorkingDir, input: null, useDialogSettings: true);
+
                 MergeConflictHandler.HandleMergeConflicts(UICommands, this, AutoCommit.Checked);
                 DialogResult = DialogResult.OK;
                 Close();

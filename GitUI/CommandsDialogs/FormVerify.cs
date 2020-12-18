@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
+using GitCommands.Git.Commands;
 using GitCommands.Git.Tag;
 using GitExtUtils;
 using GitExtUtils.GitUI;
@@ -27,6 +28,20 @@ namespace GitUI.CommandsDialogs
         private readonly DataGridViewCheckBoxHeaderCell _selectedItemsHeader = new DataGridViewCheckBoxHeaderCell();
         private readonly IGitTagController _gitTagController;
 
+        private LostObject _previewedItem;
+
+        private static readonly Dictionary<string, string> LanguagesStartOfFile = new Dictionary<string, string>
+        {
+            { "{", "recovery.json" },
+            { "#include", "recovery.cpp" },
+            { "import", "recovery.java" },
+            { "from", "recovery.py" },
+            { "package", "recovery.go" },
+            { "#!", "recovery.sh" },
+            { "[", "recovery.ini" },
+            { "using", "recovery.cs" },
+        };
+
         [Obsolete("For VS designer and translation test only. Do not remove.")]
         private FormVerify()
         {
@@ -48,6 +63,7 @@ namespace GitUI.CommandsDialogs
             columnParent.MinimumWidth = DpiUtil.Scale(75);
 
             _selectedItemsHeader.AttachTo(columnIsLostObjectSelected);
+            fileViewer.ExtraDiffArgumentsChanged += Warnings_SelectionChanged;
 
             InitializeComplete();
             Warnings.AutoGenerateColumns = false;
@@ -77,8 +93,7 @@ namespace GitUI.CommandsDialogs
         private void SaveObjectsClick(object sender, EventArgs e)
         {
             var options = GetOptions();
-
-            FormProcess.ShowDialog(this, "fsck-objects --lost-found" + options);
+            FormProcess.ShowDialog(this, process: null, arguments: $"fsck-objects --lost-found{options}", Module.WorkingDir, input: null, useDialogSettings: true);
             UpdateLostObjects();
         }
 
@@ -93,7 +108,7 @@ namespace GitUI.CommandsDialogs
                 return;
             }
 
-            FormProcess.ShowDialog(this, "prune");
+            FormProcess.ShowDialog(this, process: null, arguments: "prune", Module.WorkingDir, input: null, useDialogSettings: true);
             UpdateLostObjects();
         }
 
@@ -216,15 +231,63 @@ namespace GitUI.CommandsDialogs
             ViewCurrentItem();
         }
 
+        private void Warnings_SelectionChanged(object sender, EventArgs e)
+        {
+            if (CurrentItem == null || _previewedItem == CurrentItem)
+            {
+                return;
+            }
+
+            _previewedItem = CurrentItem;
+
+            var content = Module.ShowObject(_previewedItem.ObjectId);
+            if (_previewedItem.ObjectType == LostObjectType.Commit)
+            {
+                ThreadHelper.JoinableTaskFactory.RunAsync(() =>
+                    fileViewer.ViewFixedPatchAsync("commit.patch", content, null))
+                .FileAndForget();
+            }
+            else
+            {
+                ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    var filename = GuessFileTypeWithContent(content);
+                    await fileViewer.ViewTextAsync(filename, content ?? string.Empty, null);
+                }).FileAndForget();
+            }
+        }
+
+        private static string GuessFileTypeWithContent(string content)
+        {
+            if (content.StartsWith("<"))
+            {
+                return content.Contains("<html", StringComparison.InvariantCultureIgnoreCase) ? "recovery.html" : "recovery.xml";
+            }
+
+            foreach (var pair in LanguagesStartOfFile)
+            {
+                if (content.StartsWith(pair.Key))
+                {
+                    return pair.Value;
+                }
+            }
+
+            if (content.Contains("function"))
+            {
+                return "recovery.ts";
+            }
+
+            return "recovery.txt";
+        }
+
         #endregion
 
         private void UpdateLostObjects()
         {
             using (WaitCursorScope.Enter())
             {
-                var dialogResult = FormProcess.ReadDialog(this, "fsck-objects" + GetOptions());
-
-                if (FormProcess.IsOperationAborted(dialogResult))
+                string cmdOutput = FormProcess.ReadDialog(this, process: null, arguments: $"fsck-objects{GetOptions()}", Module.WorkingDir, input: null, useDialogSettings: true);
+                if (FormProcess.IsOperationAborted(cmdOutput))
                 {
                     DialogResult = DialogResult.Abort;
                     return;
@@ -232,7 +295,7 @@ namespace GitUI.CommandsDialogs
 
                 _lostObjects.Clear();
                 _lostObjects.AddRange(
-                    dialogResult
+                    cmdOutput
                         .Split('\r', '\n')
                         .Where(s => !string.IsNullOrEmpty(s))
                         .Select((s) => LostObject.TryParse(Module, s))

@@ -32,6 +32,27 @@ namespace GitUI.Editor
         /// </summary>
         public event Action EscapePressed;
 
+        /// <summary>
+        /// The type of information currently shown in the file viewer
+        /// </summary>
+        private enum ViewMode
+        {
+            // Plain text
+            Text,
+
+            // Diff or patch
+            Diff,
+
+            // Diffs that will not be affected by diff arguments like white space etc (limited options)
+            FixedDiff,
+
+            // range-diff output
+            RangeDiff,
+
+            // Image viewer
+            Image
+        }
+
         private readonly TranslationString _largeFileSizeWarning = new TranslationString("This file is {0:N1} MB. Showing large files can be slow. Click to show anyway.");
         private readonly TranslationString _cannotViewImage = new TranslationString("Cannot view image {0}");
 
@@ -48,34 +69,18 @@ namespace GitUI.Editor
 
         private readonly AsyncLoader _async;
         private readonly IFullPathResolver _fullPathResolver;
-        private bool _currentViewIsPatch;
-        private bool _patchHighlighting;
+        private ViewMode _viewMode;
         private Encoding _encoding;
         private Func<Task> _deferShowFunc;
         private readonly ContinuousScrollEventManager _continuousScrollEventManager;
 
-        [Description("Sets what kind of whitespace changes shall be ignored in diffs")]
-        [DefaultValue(IgnoreWhitespaceKind.None)]
-        private IgnoreWhitespaceKind IgnoreWhitespace { get; set; }
+        private static string[] _rangeDiffFullPrefixes = { "      ", "    ++", "    + ", "     +", "    --", "    - ", "     -", "    +-", "    -+", "    " };
+        private static string[] _combinedDiffFullPrefixes = { "  ", "++", "+ ", " +", "--", "- ", " -" };
+        private static string[] _normalDiffFullPrefixes = { " ", "+", "-" };
 
-        [Description("Show diffs with <n> lines of context.")]
-        [DefaultValue(3)]
-        private int NumberOfContextLines { get; set; }
-
-        [Description("Show diffs with entire file.")]
-        [DefaultValue(false)]
-        private bool ShowEntireFile { get; set; }
-
-        [Description("Treat all files as text.")]
-        [DefaultValue(false)]
-        private bool TreatAllFilesAsText { get; set; }
-
-        [Browsable(false)]
-        public byte[] FilePreamble { get; private set; }
-
-        [Description("Show syntax highlighting in diffs.")]
-        [DefaultValue(true)]
-        private bool ShowSyntaxHighlightingInDiff { get; set; }
+        private static string[] _rangeDiffPrefixes = { "    " };
+        private static string[] _combinedDiffPrefixes = { "+", "-", " +", " -" };
+        private static string[] _normalDiffPrefixes = { "+", "-" };
 
         public FileViewer()
         {
@@ -106,7 +111,7 @@ namespace GitUI.Editor
                 {
                     if (!IsDisposed)
                     {
-                        ResetForText(null);
+                        ResetView(ViewMode.Text, null);
                         internalFileViewer.SetText("Unsupported file: \n\n" + e.Exception.ToString(), openWithDifftool: null /* not applicable */);
                         TextLoaded?.Invoke(this, null);
                     }
@@ -147,7 +152,7 @@ namespace GitUI.Editor
 
             internalFileViewer.MouseMove += (_, e) =>
             {
-                if (_currentViewIsPatch && !fileviewerToolbar.Visible)
+                if (IsDiffView(_viewMode) && !fileviewerToolbar.Visible)
                 {
                     fileviewerToolbar.Visible = true;
                     fileviewerToolbar.Location = new Point(Width - fileviewerToolbar.Width - 40, 0);
@@ -164,7 +169,7 @@ namespace GitUI.Editor
             };
             internalFileViewer.TextChanged += (sender, e) =>
             {
-                if (_patchHighlighting)
+                if (IsDiffView(_viewMode))
                 {
                     internalFileViewer.AddPatchHighlighting();
                 }
@@ -192,39 +197,10 @@ namespace GitUI.Editor
             _fullPathResolver = new FullPathResolver(() => Module.WorkingDir);
         }
 
-        private void _continuousScrollEventManager_BottomScrollReached(object sender, EventArgs e)
-            => BottomScrollReached?.Invoke(sender, e);
+        // Public properties
 
-        private void _continuousScrollEventManager_TopScrollReached(object sender, EventArgs e)
-            => TopScrollReached?.Invoke(sender, e);
-
-        private void PictureBox_MouseWheel(object sender, MouseEventArgs e)
-        {
-            var isScrollingTowardTop = e.Delta > 0;
-            var isScrollingTowardBottom = e.Delta < 0;
-
-            if (isScrollingTowardTop)
-            {
-                _continuousScrollEventManager.RaiseTopScrollReached(sender, e);
-            }
-
-            if (isScrollingTowardBottom)
-            {
-                _continuousScrollEventManager.RaiseBottomScrollReached(sender, e);
-            }
-        }
-
-        private void OnUICommandsSourceSet(object sender, GitUICommandsSourceEventArgs e)
-        {
-            UICommandsSource.UICommandsChanged += OnUICommandsChanged;
-            OnUICommandsChanged(UICommandsSource, null);
-        }
-
-        protected override void DisposeUICommandsSource()
-        {
-            UICommandsSource.UICommandsChanged -= OnUICommandsChanged;
-            base.DisposeUICommandsSource();
-        }
+        [Browsable(false)]
+        public byte[] FilePreamble { get; private set; }
 
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         [Browsable(false)]
@@ -233,8 +209,6 @@ namespace GitUI.Editor
             get => internalFileViewer.Font;
             set => internalFileViewer.Font = value;
         }
-
-        public Action OpenWithDifftool => internalFileViewer.OpenWithDifftool;
 
         [DefaultValue(true)]
         [Category("Behavior")]
@@ -310,56 +284,37 @@ namespace GitUI.Editor
             set => internalFileViewer.VScrollPosition = value;
         }
 
-        private void OnUICommandsChanged(object sender, [CanBeNull] GitUICommandsChangedEventArgs e)
+        // Private properties
+
+        [Description("Sets what kind of whitespace changes shall be ignored in diffs")]
+        [DefaultValue(IgnoreWhitespaceKind.None)]
+        private IgnoreWhitespaceKind IgnoreWhitespace { get; set; }
+
+        [Description("Show diffs with <n> lines of context.")]
+        [DefaultValue(3)]
+        private int NumberOfContextLines { get; set; }
+
+        [Description("Show diffs with entire file.")]
+        [DefaultValue(false)]
+        private bool ShowEntireFile { get; set; }
+
+        [Description("Treat all files as text.")]
+        [DefaultValue(false)]
+        private bool TreatAllFilesAsText { get; set; }
+
+        [Description("Show syntax highlighting in diffs.")]
+        [DefaultValue(true)]
+        private bool ShowSyntaxHighlightingInDiff { get; set; }
+
+        // Public methods
+
+        public void SetGitBlameGutter(IEnumerable<GitBlameEntry> gitBlameEntries)
         {
-            if (e?.OldCommands != null)
+            internalFileViewer.ShowGutterAvatars = AppSettings.BlameShowAuthorAvatar;
+
+            if (AppSettings.BlameShowAuthorAvatar)
             {
-                e.OldCommands.PostSettings -= UICommands_PostSettings;
-            }
-
-            var commandSource = sender as IGitUICommandsSource;
-            if (commandSource?.UICommands != null)
-            {
-                commandSource.UICommands.PostSettings += UICommands_PostSettings;
-                UICommands_PostSettings(commandSource.UICommands, null);
-            }
-
-            Encoding = null;
-        }
-
-        private void UICommands_PostSettings(object sender, GitUIPostActionEventArgs e)
-        {
-            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
-            {
-                await internalFileViewer.SwitchToMainThreadAsync();
-                internalFileViewer.VRulerPosition = AppSettings.DiffVerticalRulerPosition;
-            }).FileAndForget();
-        }
-
-        protected override void OnRuntimeLoad()
-        {
-            ReloadHotkeys();
-            Font = AppSettings.FixedWidthFont;
-
-            DetectDefaultEncoding();
-            return;
-
-            void DetectDefaultEncoding()
-            {
-                var encodings = AppSettings.AvailableEncodings.Values.Select(e => e.EncodingName).ToArray();
-                encodingToolStripComboBox.Items.AddRange(encodings);
-                encodingToolStripComboBox.ResizeDropDownWidth(50, 250);
-
-                var defaultEncodingName = Encoding.Default.EncodingName;
-
-                for (int i = 0; i < encodings.Length; i++)
-                {
-                    if (string.Equals(encodings[i], defaultEncodingName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        encodingToolStripComboBox.Items[i] = "Default (" + Encoding.Default.HeaderName + ")";
-                        break;
-                    }
-                }
+                internalFileViewer.SetGitBlameGutter(gitBlameEntries);
             }
         }
 
@@ -388,41 +343,7 @@ namespace GitUI.Editor
             internalFileViewer.EnableScrollBars(enable);
         }
 
-        private void SetVisibilityDiffContextMenu(bool visibleTextFile, [CanBeNull] string fileName)
-        {
-            _currentViewIsPatch = visibleTextFile;
-            ignoreWhitespaceAtEolToolStripMenuItem.Visible = visibleTextFile;
-            ignoreWhitespaceChangesToolStripMenuItem.Visible = visibleTextFile;
-            ignoreAllWhitespaceChangesToolStripMenuItem.Visible = visibleTextFile;
-            increaseNumberOfLinesToolStripMenuItem.Visible = visibleTextFile;
-            decreaseNumberOfLinesToolStripMenuItem.Visible = visibleTextFile;
-            showEntireFileToolStripMenuItem.Visible = visibleTextFile;
-            toolStripSeparator2.Visible = visibleTextFile;
-            treatAllFilesAsTextToolStripMenuItem.Visible = visibleTextFile;
-            copyNewVersionToolStripMenuItem.Visible = visibleTextFile;
-            copyOldVersionToolStripMenuItem.Visible = visibleTextFile;
-
-            bool fileExists = !string.IsNullOrWhiteSpace(fileName)
-                              && File.Exists(_fullPathResolver.Resolve(fileName));
-
-            cherrypickSelectedLinesToolStripMenuItem.Visible =
-                revertSelectedLinesToolStripMenuItem.Visible =
-                    visibleTextFile && fileExists && !Module.IsBareRepository();
-            copyPatchToolStripMenuItem.Visible = visibleTextFile;
-        }
-
-        private void SetVisibilityDiffContextMenuStaging()
-        {
-            cherrypickSelectedLinesToolStripMenuItem.Visible = false;
-            revertSelectedLinesToolStripMenuItem.Visible = false;
-        }
-
-        private void OnExtraDiffArgumentsChanged()
-        {
-            ExtraDiffArgumentsChanged?.Invoke(this, EventArgs.Empty);
-        }
-
-        public ArgumentString GetExtraDiffArguments()
+        public ArgumentString GetExtraDiffArguments(bool isRangeDiff = false)
         {
             return new ArgumentBuilder
             {
@@ -430,8 +351,257 @@ namespace GitUI.Editor
                 { IgnoreWhitespace == IgnoreWhitespaceKind.Change, "--ignore-space-change" },
                 { IgnoreWhitespace == IgnoreWhitespaceKind.Eol, "--ignore-space-at-eol" },
                 { ShowEntireFile, "--inter-hunk-context=9000 --unified=9000", $"--unified={NumberOfContextLines}" },
+
+                // Handle zero context as showing no file changes, to get the summary only
+                { isRangeDiff && NumberOfContextLines == 0, "--no-patch " },
                 { TreatAllFilesAsText, "--text" }
             };
+        }
+
+        public string GetSelectedText()
+        {
+            return internalFileViewer.GetSelectedText();
+        }
+
+        public int GetSelectionPosition()
+        {
+            return internalFileViewer.GetSelectionPosition();
+        }
+
+        public int GetSelectionLength()
+        {
+            return internalFileViewer.GetSelectionLength();
+        }
+
+        public void GoToLine(int line)
+        {
+            internalFileViewer.GoToLine(line);
+        }
+
+        public int GetLineFromVisualPosY(int visualPosY)
+        {
+            return internalFileViewer.GetLineFromVisualPosY(visualPosY);
+        }
+
+        public void HighlightLines(int startLine, int endLine, Color color)
+        {
+            internalFileViewer.HighlightLines(startLine, endLine, color);
+        }
+
+        public void ClearHighlighting()
+        {
+            internalFileViewer.ClearHighlighting();
+        }
+
+        public string GetText() => internalFileViewer.GetText();
+
+        public void ViewCurrentChanges(GitItemStatus item, bool isStaged, [CanBeNull] Action openWithDifftool)
+        {
+            ThreadHelper.JoinableTaskFactory.RunAsync(
+                async () =>
+                {
+                    if (item?.IsStatusOnly ?? false)
+                    {
+                        // Present error (e.g. parsing Git)
+                        await ViewTextAsync(item.Name, item.ErrorMessage);
+                        return;
+                    }
+
+                    if (item.IsSubmodule)
+                    {
+                        var getStatusTask = item.GetSubmoduleStatusAsync();
+                        if (getStatusTask != null)
+                        {
+                            var status = await getStatusTask;
+                            if (status == null)
+                            {
+                                await ViewTextAsync(item.Name, $"Submodule \"{item.Name}\" has unresolved conflicts");
+                                return;
+                            }
+
+                            await ViewTextAsync(item.Name, LocalizationHelpers.ProcessSubmoduleStatus(Module, status));
+                            return;
+                        }
+
+                        var changes = await Module.GetCurrentChangesAsync(item.Name, item.OldName, isStaged,
+                            GetExtraDiffArguments(), Encoding);
+                        var text = LocalizationHelpers.ProcessSubmodulePatch(Module, item.Name, changes);
+                        await ViewTextAsync(item.Name, text);
+                        return;
+                    }
+
+                    if (!item.IsTracked || item.IsNew)
+                    {
+                        var id = isStaged ? ObjectId.IndexId : ObjectId.WorkTreeId;
+                        await ViewGitItemRevisionAsync(item, id, openWithDifftool);
+                    }
+                    else
+                    {
+                        var patch = await Module.GetCurrentChangesAsync(
+                            item.Name, item.OldName, isStaged, GetExtraDiffArguments(), Encoding);
+                        await ViewPatchAsync(item.Name, patch?.Text ?? "", openWithDifftool);
+                    }
+
+                    SetVisibilityDiffContextMenuStaging();
+                });
+        }
+
+        /// <summary>
+        /// Present the text as a patch in the file viewer
+        /// </summary>
+        /// <param name="fileName">The fileName to present</param>
+        /// <param name="text">The patch text</param>
+        /// <param name="openWithDifftool">The action to open the difftool</param>
+        public void ViewPatch([CanBeNull] string fileName,
+            [NotNull] string text,
+            [CanBeNull] Action openWithDifftool = null)
+        {
+            ThreadHelper.JoinableTaskFactory.Run(
+                () => ViewPatchAsync(fileName, text, openWithDifftool));
+        }
+
+        public async Task ViewPatchAsync(string fileName, string text, Action openWithDifftool)
+            => await ViewPrivateAsync(fileName, text, openWithDifftool, ViewMode.Diff);
+
+        /// <summary>
+        /// Present the text as a patch in the file viewer, for GitHub
+        /// </summary>
+        /// <param name="fileName">The fileName to present</param>
+        /// <param name="text">The patch text</param>
+        /// <param name="openWithDifftool">The action to open the difftool</param>
+        public void ViewFixedPatch([CanBeNull] string fileName,
+            [NotNull] string text,
+            [CanBeNull] Action openWithDifftool = null)
+        {
+            ThreadHelper.JoinableTaskFactory.Run(
+                () => ViewPrivateAsync(fileName, text, openWithDifftool, ViewMode.FixedDiff));
+        }
+
+        public async Task ViewFixedPatchAsync(string fileName, string text, Action openWithDifftool = null)
+            => await ViewPrivateAsync(fileName, text, openWithDifftool, ViewMode.FixedDiff);
+
+        public async Task ViewRangeDiffAsync(string fileName, string text)
+            => await ViewPrivateAsync(fileName, text, openWithDifftool: null, ViewMode.RangeDiff);
+
+        public void ViewText([CanBeNull] string fileName,
+            [NotNull] string text,
+            [CanBeNull] Action openWithDifftool = null)
+        {
+            ThreadHelper.JoinableTaskFactory.Run(
+                () => ViewTextAsync(fileName, text, openWithDifftool));
+        }
+
+        public async Task ViewTextAsync([CanBeNull] string fileName, [NotNull] string text,
+            [CanBeNull] Action openWithDifftool = null, bool checkGitAttributes = false)
+        {
+            await ShowOrDeferAsync(
+                text.Length,
+                () =>
+                {
+                    ResetView(ViewMode.Text, fileName);
+
+                    // Check for binary file. Using gitattributes could be misleading for a changed file,
+                    // but not much other can be done
+                    bool isBinary = (checkGitAttributes && FileHelper.IsBinaryFileName(Module, fileName))
+                                    || FileHelper.IsBinaryFileAccordingToContent(text);
+
+                    if (isBinary)
+                    {
+                        try
+                        {
+                            var summary = new StringBuilder()
+                                .AppendLine("Binary file:")
+                                .AppendLine()
+                                .AppendLine(fileName)
+                                .AppendLine()
+                                .AppendLine($"{text.Length:N0} bytes:")
+                                .AppendLine();
+                            internalFileViewer.SetText(summary.ToString(), openWithDifftool);
+
+                            ToHexDump(Encoding.ASCII.GetBytes(text), summary);
+                            internalFileViewer.SetText(summary.ToString(), openWithDifftool);
+                        }
+                        catch
+                        {
+                            internalFileViewer.SetText($"Binary file: {fileName} (Detected)", openWithDifftool);
+                        }
+                    }
+                    else
+                    {
+                        internalFileViewer.SetText(text, openWithDifftool);
+                    }
+
+                    TextLoaded?.Invoke(this, null);
+                    return Task.CompletedTask;
+                });
+        }
+
+        public Task ViewGitItemRevisionAsync(GitItemStatus file, ObjectId revision, [CanBeNull] Action openWithDifftool = null)
+        {
+            if (revision == ObjectId.WorkTreeId)
+            {
+                // No blob exists for worktree, present contents from file system
+                return ViewFileAsync(file.Name, file.IsSubmodule, openWithDifftool);
+            }
+
+            if (file.TreeGuid == null)
+            {
+                file.TreeGuid = Module.GetFileBlobHash(file.Name, revision);
+            }
+
+            return ViewGitItemAsync(file, openWithDifftool);
+        }
+
+        /// <summary>
+        /// View the git item with the TreeGuid
+        /// </summary>
+        /// <param name="file">GitItem file, with TreeGuid</param>
+        /// <param name="openWithDifftool">difftool command</param>
+        /// <returns>Task to view the item</returns>
+        public Task ViewGitItemAsync(GitItemStatus file, [CanBeNull] Action openWithDifftool = null)
+        {
+            var sha = file.TreeGuid?.ToString();
+            var isSubmodule = file.IsSubmodule;
+
+            if (!isSubmodule && file.IsNew && file.Staged == StagedStatus.Index)
+            {
+                // File system access for other than Worktree,
+                // to handle that git-status does not detect details for untracked (git-diff --no-index will not give info)
+                var fullPath = PathUtil.Combine(Module.WorkingDir, file.Name);
+                if (Directory.Exists(fullPath) && GitModule.IsValidGitWorkingDir(fullPath))
+                {
+                    isSubmodule = true;
+                }
+            }
+
+            return ViewItemAsync(
+                file.Name,
+                isSubmodule,
+                getImage: GetImage,
+                getFileText: GetFileTextIfBlobExists,
+                getSubmoduleText: () => LocalizationHelpers.GetSubmoduleText(Module, file.Name.TrimEnd('/'), sha),
+                openWithDifftool: openWithDifftool);
+
+            string GetFileTextIfBlobExists()
+            {
+                FilePreamble = new byte[] { };
+                return file.TreeGuid != null ? Module.GetFileText(file.TreeGuid, Encoding) : string.Empty;
+            }
+
+            Image GetImage()
+            {
+                try
+                {
+                    using (var stream = Module.GetFileStream(sha))
+                    {
+                        return CreateImage(file.Name, stream);
+                    }
+                }
+                catch
+                {
+                    return null;
+                }
+            }
         }
 
         /// <summary>
@@ -443,7 +613,7 @@ namespace GitUI.Editor
         /// <returns>Task</returns>
         public Task ViewFileAsync(string fileName, bool isSubmodule = false, [CanBeNull] Action openWithDifftool = null)
         {
-            string fullPath = Path.GetFullPath(_fullPathResolver.Resolve(fileName));
+            string fullPath = _fullPathResolver.Resolve(fileName);
 
             if (isSubmodule && !GitModule.IsValidGitWorkingDir(fullPath))
             {
@@ -515,6 +685,191 @@ namespace GitUI.Editor
             }
         }
 
+        public void Clear()
+        {
+            ThreadHelper.JoinableTaskFactory.Run(() => ViewTextAsync("", ""));
+        }
+
+        public bool HasAnyPatches()
+        {
+            return internalFileViewer.GetText() != null && internalFileViewer.GetText().Contains("@@");
+        }
+
+        public void SetFileLoader(GetNextFileFnc fileLoader)
+        {
+            internalFileViewer.SetFileLoader(fileLoader);
+        }
+
+        public void CherryPickAllChanges()
+        {
+            if (GetText().Length > 0)
+            {
+                applySelectedLines(0, GetText().Length, reverse: false);
+            }
+        }
+
+        // Protected
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                UICommandsSourceSet -= OnUICommandsSourceSet;
+                _async.Dispose();
+                components?.Dispose();
+
+                if (TryGetUICommands(out var uiCommands))
+                {
+                    uiCommands.PostSettings -= UICommands_PostSettings;
+                }
+            }
+
+            base.Dispose(disposing);
+        }
+
+        protected override void DisposeUICommandsSource()
+        {
+            UICommandsSource.UICommandsChanged -= OnUICommandsChanged;
+            base.DisposeUICommandsSource();
+        }
+
+        protected override void OnRuntimeLoad()
+        {
+            ReloadHotkeys();
+            Font = AppSettings.FixedWidthFont;
+
+            DetectDefaultEncoding();
+            return;
+
+            void DetectDefaultEncoding()
+            {
+                var encodings = AppSettings.AvailableEncodings.Values.Select(e => e.EncodingName).ToArray();
+                encodingToolStripComboBox.Items.AddRange(encodings);
+                encodingToolStripComboBox.ResizeDropDownWidth(50, 250);
+
+                var defaultEncodingName = Encoding.Default.EncodingName;
+
+                for (int i = 0; i < encodings.Length; i++)
+                {
+                    if (string.Equals(encodings[i], defaultEncodingName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        encodingToolStripComboBox.Items[i] = "Default (" + Encoding.Default.HeaderName + ")";
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Private methods
+
+        private static bool IsDiffView(ViewMode viewMode)
+        {
+            return viewMode == ViewMode.Diff || viewMode == ViewMode.FixedDiff || viewMode == ViewMode.RangeDiff;
+        }
+
+        private async Task ViewPrivateAsync(string fileName, string text, Action openWithDifftool, ViewMode viewMode = ViewMode.Diff)
+        {
+            await ShowOrDeferAsync(
+                text.Length,
+                () =>
+                {
+                    ResetView(viewMode, fileName);
+                    internalFileViewer.SetText(text, openWithDifftool, isDiff: IsDiffView(_viewMode), isRangeDiff: _viewMode == ViewMode.RangeDiff);
+
+                    TextLoaded?.Invoke(this, null);
+                    return Task.CompletedTask;
+                });
+        }
+
+        private void CopyNotStartingWith(char startChar)
+        {
+            string code = internalFileViewer.GetSelectedText();
+            bool noSelection = false;
+
+            if (string.IsNullOrEmpty(code))
+            {
+                code = internalFileViewer.GetText();
+                noSelection = true;
+            }
+
+            if (IsDiffView(_viewMode))
+            {
+                // add artificial space if selected text is not starting from line beginning, it will be removed later
+                int pos = noSelection ? 0 : internalFileViewer.GetSelectionPosition();
+                string fileText = internalFileViewer.GetText();
+
+                if (pos > 0 && fileText[pos - 1] != '\n')
+                {
+                    code = " " + code;
+                }
+
+                var lines = code.Split('\n')
+                    .Where(s => s.Length == 0 || s[0] != startChar || (s.Length > 2 && s[1] == s[0] && s[2] == s[0]));
+                var hpos = fileText.IndexOf("\n@@");
+
+                // if header is selected then don't remove diff extra chars
+                if (hpos <= pos)
+                {
+                    char[] specials = { ' ', '-', '+' };
+                    lines = lines.Select(s => s.Length > 0 && specials.Any(c => c == s[0]) ? s.Substring(1) : s);
+                }
+
+                code = string.Join("\n", lines);
+            }
+
+            ClipboardUtil.TrySetText(code.AdjustLineEndings(Module.EffectiveConfigFile.core.autocrlf.Value));
+        }
+
+        private void SetVisibilityDiffContextMenu(ViewMode viewMode, [CanBeNull] string fileName)
+        {
+            bool changePhysicalFile = (viewMode == ViewMode.Diff || viewMode == ViewMode.FixedDiff)
+                                      && !Module.IsBareRepository()
+                                      && File.Exists(_fullPathResolver.Resolve(fileName));
+
+            cherrypickSelectedLinesToolStripMenuItem.Visible = changePhysicalFile;
+            revertSelectedLinesToolStripMenuItem.Visible = changePhysicalFile;
+
+            // RangeDiff patch is undefined, could be new/old commit or to parents
+            copyPatchToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.FixedDiff;
+            copyNewVersionToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.FixedDiff;
+            copyOldVersionToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.FixedDiff;
+
+            ignoreWhitespaceAtEolToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            ignoreWhitespaceChangesToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            ignoreAllWhitespaceChangesToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            increaseNumberOfLinesToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            decreaseNumberOfLinesToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            showEntireFileToolStripMenuItem.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            toolStripSeparator2.Visible = IsDiffView(viewMode);
+            treatAllFilesAsTextToolStripMenuItem.Visible = IsDiffView(viewMode);
+
+            // toolbar
+            nextChangeButton.Visible = IsDiffView(viewMode);
+            previousChangeButton.Visible = IsDiffView(viewMode);
+            increaseNumberOfLines.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            decreaseNumberOfLines.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            showEntireFileButton.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            showSyntaxHighlighting.Visible = IsDiffView(viewMode);
+            ignoreWhitespaceAtEol.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            ignoreWhiteSpaces.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+            ignoreAllWhitespaces.Visible = viewMode == ViewMode.Diff || viewMode == ViewMode.RangeDiff;
+        }
+
+        private void SetVisibilityDiffContextMenuStaging()
+        {
+            cherrypickSelectedLinesToolStripMenuItem.Visible = false;
+            revertSelectedLinesToolStripMenuItem.Visible = false;
+        }
+
+        private void OnExtraDiffArgumentsChanged()
+        {
+            ExtraDiffArgumentsChanged?.Invoke(this, EventArgs.Empty);
+        }
+
         private Task ShowOrDeferAsync(string fileName, Func<Task> showFunc)
         {
             return ShowOrDeferAsync(GetFileLength(), showFunc);
@@ -523,10 +878,11 @@ namespace GitUI.Editor
             {
                 try
                 {
-                    var file = GetFileInfo(fileName);
+                    var resolvedPath = _fullPathResolver.Resolve(fileName);
 
-                    if (file.Exists)
+                    if (File.Exists(resolvedPath))
                     {
+                        var file = new FileInfo(resolvedPath);
                         return file.Length;
                     }
                 }
@@ -562,150 +918,161 @@ namespace GitUI.Editor
             }
         }
 
-        private void llShowPreview_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        [NotNull]
+        private static Image CreateImage([NotNull] string fileName, [NotNull] Stream stream)
         {
-            _NO_TRANSLATE_lblShowPreview.Hide();
-            ThreadHelper.JoinableTaskFactory.Run(() => _deferShowFunc());
+            if (IsIcon())
+            {
+                using (var icon = new Icon(stream))
+                {
+                    return icon.ToBitmap();
+                }
+            }
+
+            return new Bitmap(CopyStream());
+
+            bool IsIcon()
+            {
+                return fileName.EndsWith(".ico", StringComparison.CurrentCultureIgnoreCase);
+            }
+
+            MemoryStream CopyStream()
+            {
+                var copy = new MemoryStream();
+                stream.CopyTo(copy);
+                return copy;
+            }
         }
 
-        public string GetText() => internalFileViewer.GetText();
-
-        public void ViewCurrentChanges(GitItemStatus item, bool isStaged, [CanBeNull] Action openWithDifftool)
+        private void OnIgnoreWhitespaceChanged()
         {
-            ThreadHelper.JoinableTaskFactory.RunAsync(
-                async () =>
-                {
-                    if (!string.IsNullOrWhiteSpace(item?.ErrorMessage))
-                    {
-                        // Present error (e.g. parsing Git)
-                        await ViewTextAsync(item.Name, item.ErrorMessage);
-                        return;
-                    }
+            switch (IgnoreWhitespace)
+            {
+                case IgnoreWhitespaceKind.None:
+                    ignoreWhitespaceAtEol.Checked = false;
+                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
+                    ignoreWhiteSpaces.Checked = false;
+                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
+                    ignoreAllWhitespaces.Checked = false;
+                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
+                    break;
+                case IgnoreWhitespaceKind.Eol:
+                    ignoreWhitespaceAtEol.Checked = true;
+                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
+                    ignoreWhiteSpaces.Checked = false;
+                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
+                    ignoreAllWhitespaces.Checked = false;
+                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
+                    break;
+                case IgnoreWhitespaceKind.Change:
+                    ignoreWhitespaceAtEol.Checked = true;
+                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
+                    ignoreWhiteSpaces.Checked = true;
+                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
+                    ignoreAllWhitespaces.Checked = false;
+                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
+                    break;
+                case IgnoreWhitespaceKind.AllSpace:
+                    ignoreWhitespaceAtEol.Checked = true;
+                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
+                    ignoreWhiteSpaces.Checked = true;
+                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
+                    ignoreAllWhitespaces.Checked = true;
+                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
+                    break;
+                default:
+                    throw new NotSupportedException("Unsupported value for IgnoreWhitespaceKind: " + IgnoreWhitespace);
+            }
 
-                    if (item.IsSubmodule)
-                    {
-                        var getStatusTask = item.GetSubmoduleStatusAsync();
-                        if (getStatusTask != null)
-                        {
-                            var status = await getStatusTask;
-                            if (status == null)
+            AppSettings.IgnoreWhitespaceKind = IgnoreWhitespace;
+        }
+
+        private void ResetView(ViewMode viewMode, [CanBeNull] string fileName)
+        {
+            _viewMode = viewMode;
+            if (_viewMode == ViewMode.Text
+                && !string.IsNullOrEmpty(fileName)
+                && (fileName.EndsWith(".diff", StringComparison.OrdinalIgnoreCase)
+                    || fileName.EndsWith(".patch", StringComparison.OrdinalIgnoreCase)))
+            {
+                _viewMode = ViewMode.FixedDiff;
+            }
+
+            SetVisibilityDiffContextMenu(_viewMode, fileName);
+            ClearImage();
+            PictureBox.Visible = _viewMode == ViewMode.Image;
+            internalFileViewer.Visible = _viewMode != ViewMode.Image;
+
+            if (((ShowSyntaxHighlightingInDiff && IsDiffView(_viewMode)) || _viewMode == ViewMode.Text) && fileName != null)
+            {
+                internalFileViewer.SetHighlightingForFile(fileName);
+            }
+            else
+            {
+                internalFileViewer.SetHighlighting("");
+            }
+
+            return;
+
+            void ClearImage()
+            {
+                PictureBox.ImageLocation = "";
+
+                if (PictureBox.Image == null)
+                {
+                    return;
+                }
+
+                PictureBox.Image.Dispose();
+                PictureBox.Image = null;
+            }
+        }
+
+        private Task ViewItemAsync(string fileName, bool isSubmodule, Func<Image> getImage, Func<string> getFileText, Func<string> getSubmoduleText, [CanBeNull] Action openWithDifftool)
+        {
+            FilePreamble = null;
+
+            if (isSubmodule)
+            {
+                return _async.LoadAsync(
+                    getSubmoduleText,
+                    text => ThreadHelper.JoinableTaskFactory.Run(
+                        () => ViewTextAsync(fileName, text, openWithDifftool)));
+            }
+            else if (FileHelper.IsImage(fileName))
+            {
+                return _async.LoadAsync(getImage,
+                            image =>
                             {
-                                await ViewTextAsync(item.Name, $"Submodule \"{item.Name}\" has unresolved conflicts");
-                                return;
-                            }
+                                if (image == null)
+                                {
+                                    ResetView(ViewMode.Text, null);
+                                    internalFileViewer.SetText(string.Format(_cannotViewImage.Text, fileName), openWithDifftool);
+                                    return;
+                                }
 
-                            await ViewTextAsync(item.Name, LocalizationHelpers.ProcessSubmoduleStatus(Module, status));
-                            return;
-                        }
+                                ResetView(ViewMode.Image, fileName);
+                                var size = DpiUtil.Scale(image.Size);
+                                if (size.Height > PictureBox.Size.Height || size.Width > PictureBox.Size.Width)
+                                {
+                                    PictureBox.SizeMode = PictureBoxSizeMode.Zoom;
+                                }
+                                else
+                                {
+                                    PictureBox.SizeMode = PictureBoxSizeMode.CenterImage;
+                                }
 
-                        var changes = await Module.GetCurrentChangesAsync(item.Name, item.OldName, isStaged,
-                            GetExtraDiffArguments(), Encoding);
-                        var text = LocalizationHelpers.ProcessSubmodulePatch(Module, item.Name, changes);
-                        await ViewTextAsync(item.Name, text);
-                        return;
-                    }
-
-                    if (!item.IsTracked || item.IsNew)
-                    {
-                        var id = isStaged ? ObjectId.IndexId : ObjectId.WorkTreeId;
-                        await ViewGitItemRevisionAsync(item, id, openWithDifftool);
-                    }
-                    else
-                    {
-                        var patch = await Module.GetCurrentChangesAsync(
-                            item.Name, item.OldName, isStaged, GetExtraDiffArguments(), Encoding);
-                        await ViewPatchAsync(item.Name, patch?.Text ?? "", openWithDifftool);
-                    }
-
-                    SetVisibilityDiffContextMenuStaging();
-                });
-        }
-
-        /// <summary>
-        /// Present the text as a patch in the file viewer
-        /// </summary>
-        /// <param name="fileName">The fileName to present</param>
-        /// <param name="text">The patch text</param>
-        /// <param name="openWithDifftool">The action to open the difftool</param>
-        public void ViewPatch([CanBeNull] string fileName,
-            [NotNull] string text,
-            [CanBeNull] Action openWithDifftool = null)
-        {
-            ThreadHelper.JoinableTaskFactory.Run(
-                () => ViewPatchAsync(fileName, text, openWithDifftool));
-        }
-
-        public async Task ViewPatchAsync(string fileName, string text, Action openWithDifftool)
-        {
-            await ShowOrDeferAsync(
-                text.Length,
-                () =>
-                {
-                    ResetForDiff(fileName);
-                    internalFileViewer.SetText(text, openWithDifftool, isDiff: true);
-
-                    TextLoaded?.Invoke(this, null);
-                    return Task.CompletedTask;
-                });
-        }
-
-        public void ViewText([CanBeNull] string fileName,
-            [NotNull] string text,
-            [CanBeNull] Action openWithDifftool = null)
-        {
-            ThreadHelper.JoinableTaskFactory.Run(
-                () => ViewTextAsync(fileName, text, openWithDifftool));
-        }
-
-        public async Task ViewTextAsync([CanBeNull] string fileName, [NotNull] string text,
-            [CanBeNull] Action openWithDifftool = null, bool checkGitAttributes = false)
-        {
-            await ShowOrDeferAsync(
-                text.Length,
-                () =>
-                {
-                    ResetForText(fileName);
-
-                    // Check for binary file. Using gitattributes could be misleading for a changed file,
-                    // but not much other can be done
-                    bool isBinary = (checkGitAttributes && FileHelper.IsBinaryFileName(Module, fileName))
-                                    || FileHelper.IsBinaryFileAccordingToContent(text);
-
-                    if (isBinary)
-                    {
-                        try
-                        {
-                            var summary = new StringBuilder()
-                                .AppendLine("Binary file:")
-                                .AppendLine()
-                                .AppendLine(fileName)
-                                .AppendLine()
-                                .AppendLine($"{text.Length:N0} bytes:")
-                                .AppendLine();
-                            internalFileViewer.SetText(summary.ToString(), openWithDifftool);
-
-                            ToHexDump(Encoding.ASCII.GetBytes(text), summary);
-                            internalFileViewer.SetText(summary.ToString(), openWithDifftool);
-                        }
-                        catch
-                        {
-                            internalFileViewer.SetText($"Binary file: {fileName} (Detected)", openWithDifftool);
-                        }
-                    }
-                    else
-                    {
-                        internalFileViewer.SetText(text, openWithDifftool);
-                    }
-
-                    TextLoaded?.Invoke(this, null);
-                    return Task.CompletedTask;
-                });
-        }
-
-        private FileInfo GetFileInfo(string fileName)
-        {
-            var resolvedPath = _fullPathResolver.Resolve(fileName);
-            return new FileInfo(resolvedPath);
+                                PictureBox.Image = DpiUtil.Scale(image);
+                                internalFileViewer.SetText("", openWithDifftool);
+                            });
+            }
+            else
+            {
+                return _async.LoadAsync(
+                    getFileText,
+                    text => ThreadHelper.JoinableTaskFactory.Run(
+                        () => ViewTextAsync(fileName, text, openWithDifftool, checkGitAttributes: true)));
+            }
         }
 
         private static string ToHexDump(byte[] bytes, StringBuilder str, int columnWidth = 8, int columnCount = 2)
@@ -794,254 +1161,47 @@ namespace GitUI.Editor
             return str.ToString();
         }
 
-        public Task ViewGitItemRevisionAsync(GitItemStatus file, ObjectId revision, [CanBeNull] Action openWithDifftool = null)
+        private void SetStateOfContextLinesButtons()
         {
-            if (revision == ObjectId.WorkTreeId)
-            {
-                // No blob exists for worktree, present contents from file system
-                return ViewFileAsync(file.Name, file.IsSubmodule, openWithDifftool);
-            }
-
-            if (file.TreeGuid == null)
-            {
-                file.TreeGuid = Module.GetFileBlobHash(file.Name, revision);
-            }
-
-            return ViewGitItemAsync(file, openWithDifftool);
+            increaseNumberOfLines.Enabled = !ShowEntireFile;
+            decreaseNumberOfLines.Enabled = !ShowEntireFile;
+            increaseNumberOfLinesToolStripMenuItem.Enabled = !ShowEntireFile;
+            decreaseNumberOfLinesToolStripMenuItem.Enabled = !ShowEntireFile;
         }
 
-        /// <summary>
-        /// View the git item with the TreeGuid
-        /// </summary>
-        /// <param name="file">GitItem file, with TreeGuid</param>
-        /// <param name="openWithDifftool">difftool command</param>
-        /// <returns>Task to view the item</returns>
-        public Task ViewGitItemAsync(GitItemStatus file, [CanBeNull] Action openWithDifftool = null)
+        private void ToggleNonPrintingChars(bool show)
         {
-            var sha = file.TreeGuid?.ToString();
-            var isSubmodule = file.IsSubmodule;
-
-            if (!isSubmodule && file.IsNew && file.Staged == StagedStatus.Index)
-            {
-                // File system access for other than Worktree,
-                // to handle that git-status does not detect details for untracked (git-diff --no-index will not give info)
-                var fullPath = Path.Combine(Module.WorkingDir, file.Name);
-                if (Directory.Exists(fullPath) && GitModule.IsValidGitWorkingDir(fullPath))
-                {
-                    isSubmodule = true;
-                }
-            }
-
-            return ViewItemAsync(
-                file.Name,
-                isSubmodule,
-                getImage: GetImage,
-                getFileText: GetFileTextIfBlobExists,
-                getSubmoduleText: () => LocalizationHelpers.GetSubmoduleText(Module, file.Name.TrimEnd('/'), sha),
-                openWithDifftool: openWithDifftool);
-
-            string GetFileTextIfBlobExists()
-            {
-                FilePreamble = new byte[] { };
-                return file.TreeGuid != null ? Module.GetFileText(file.TreeGuid, Encoding) : string.Empty;
-            }
-
-            Image GetImage()
-            {
-                try
-                {
-                    using (var stream = Module.GetFileStream(sha))
-                    {
-                        return CreateImage(file.Name, stream);
-                    }
-                }
-                catch
-                {
-                    return null;
-                }
-            }
+            internalFileViewer.ShowEOLMarkers = show;
+            internalFileViewer.ShowSpaces = show;
+            internalFileViewer.ShowTabs = show;
         }
 
-        private Task ViewItemAsync(string fileName, bool isSubmodule, Func<Image> getImage, Func<string> getFileText, Func<string> getSubmoduleText, [CanBeNull] Action openWithDifftool)
+        // Event handlers
+
+        private void OnUICommandsChanged(object sender, [CanBeNull] GitUICommandsChangedEventArgs e)
         {
-            FilePreamble = null;
-
-            if (isSubmodule)
+            if (e?.OldCommands != null)
             {
-                return _async.LoadAsync(
-                    getSubmoduleText,
-                    text => ThreadHelper.JoinableTaskFactory.Run(
-                        () => ViewTextAsync(fileName, text, openWithDifftool)));
+                e.OldCommands.PostSettings -= UICommands_PostSettings;
             }
-            else if (FileHelper.IsImage(fileName))
-            {
-                return _async.LoadAsync(getImage,
-                            image =>
-                            {
-                                if (image == null)
-                                {
-                                    ResetForText(null);
-                                    internalFileViewer.SetText(string.Format(_cannotViewImage.Text, fileName), openWithDifftool);
-                                    return;
-                                }
 
-                                ResetForImage(fileName);
-                                var size = DpiUtil.Scale(image.Size);
-                                if (size.Height > PictureBox.Size.Height || size.Width > PictureBox.Size.Width)
-                                {
-                                    PictureBox.SizeMode = PictureBoxSizeMode.Zoom;
-                                }
-                                else
-                                {
-                                    PictureBox.SizeMode = PictureBoxSizeMode.CenterImage;
-                                }
-
-                                PictureBox.Image = DpiUtil.Scale(image);
-                                internalFileViewer.SetText("", openWithDifftool);
-                            });
-            }
-            else
+            var commandSource = sender as IGitUICommandsSource;
+            if (commandSource?.UICommands != null)
             {
-                return _async.LoadAsync(
-                    getFileText,
-                    text => ThreadHelper.JoinableTaskFactory.Run(
-                        () => ViewTextAsync(fileName, text, openWithDifftool, checkGitAttributes: true)));
+                commandSource.UICommands.PostSettings += UICommands_PostSettings;
+                UICommands_PostSettings(commandSource.UICommands, null);
             }
+
+            Encoding = null;
         }
 
-        [NotNull]
-        private static Image CreateImage([NotNull] string fileName, [NotNull] Stream stream)
+        private void UICommands_PostSettings(object sender, GitUIPostActionEventArgs e)
         {
-            if (IsIcon())
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                using (var icon = new Icon(stream))
-                {
-                    return icon.ToBitmap();
-                }
-            }
-
-            return new Bitmap(CopyStream());
-
-            bool IsIcon()
-            {
-                return fileName.EndsWith(".ico", StringComparison.CurrentCultureIgnoreCase);
-            }
-
-            MemoryStream CopyStream()
-            {
-                var copy = new MemoryStream();
-                stream.CopyTo(copy);
-                return copy;
-            }
-        }
-
-        private void ResetForImage([CanBeNull] string fileName)
-        {
-            Reset(false, false, fileName);
-            internalFileViewer.SetHighlighting("Default");
-        }
-
-        private void ResetForText([CanBeNull] string fileName)
-        {
-            if (!string.IsNullOrEmpty(fileName) &&
-                (fileName.EndsWith(".diff", StringComparison.OrdinalIgnoreCase) ||
-                 fileName.EndsWith(".patch", StringComparison.OrdinalIgnoreCase)))
-            {
-                ResetForDiff(fileName);
-                return;
-            }
-
-            Reset(false, true, fileName);
-
-            if (fileName == null)
-            {
-                internalFileViewer.SetHighlighting("Default");
-            }
-            else
-            {
-                internalFileViewer.SetHighlightingForFile(fileName);
-            }
-        }
-
-        private void ResetForDiff([CanBeNull] string fileName)
-        {
-            Reset(true, true, fileName);
-
-            if (ShowSyntaxHighlightingInDiff && fileName != null)
-            {
-                internalFileViewer.SetHighlightingForFile(fileName);
-            }
-            else
-            {
-                internalFileViewer.SetHighlighting("");
-            }
-        }
-
-        private void Reset(bool isDiff, bool isText, [CanBeNull] string fileName)
-        {
-            _patchHighlighting = isDiff;
-            SetVisibilityDiffContextMenu(isDiff, fileName);
-            ClearImage();
-            PictureBox.Visible = !isText;
-            internalFileViewer.Visible = isText;
-
-            return;
-
-            void ClearImage()
-            {
-                PictureBox.ImageLocation = "";
-
-                if (PictureBox.Image == null)
-                {
-                    return;
-                }
-
-                PictureBox.Image.Dispose();
-                PictureBox.Image = null;
-            }
-        }
-
-        private void OnIgnoreWhitespaceChanged()
-        {
-            switch (IgnoreWhitespace)
-            {
-                case IgnoreWhitespaceKind.None:
-                    ignoreWhitespaceAtEol.Checked = false;
-                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
-                    ignoreWhiteSpaces.Checked = false;
-                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
-                    ignoreAllWhitespaces.Checked = false;
-                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
-                    break;
-                case IgnoreWhitespaceKind.Eol:
-                    ignoreWhitespaceAtEol.Checked = true;
-                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
-                    ignoreWhiteSpaces.Checked = false;
-                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
-                    ignoreAllWhitespaces.Checked = false;
-                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
-                    break;
-                case IgnoreWhitespaceKind.Change:
-                    ignoreWhitespaceAtEol.Checked = true;
-                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
-                    ignoreWhiteSpaces.Checked = true;
-                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
-                    ignoreAllWhitespaces.Checked = false;
-                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
-                    break;
-                case IgnoreWhitespaceKind.AllSpace:
-                    ignoreWhitespaceAtEol.Checked = true;
-                    ignoreWhitespaceAtEolToolStripMenuItem.Checked = ignoreWhitespaceAtEol.Checked;
-                    ignoreWhiteSpaces.Checked = true;
-                    ignoreWhitespaceChangesToolStripMenuItem.Checked = ignoreWhiteSpaces.Checked;
-                    ignoreAllWhitespaces.Checked = true;
-                    ignoreAllWhitespaceChangesToolStripMenuItem.Checked = ignoreAllWhitespaces.Checked;
-                    break;
-                default:
-                    throw new NotSupportedException("Unsupported value for IgnoreWhitespaceKind: " + IgnoreWhitespace);
-            }
-
-            AppSettings.IgnoreWhitespaceKind = IgnoreWhitespace;
+                await internalFileViewer.SwitchToMainThreadAsync();
+                internalFileViewer.VRulerPosition = AppSettings.DiffVerticalRulerPosition;
+            }).FileAndForget();
         }
 
         private void IgnoreWhitespaceAtEolToolStripMenuItem_Click(object sender, EventArgs e)
@@ -1114,12 +1274,38 @@ namespace GitUI.Editor
             OnExtraDiffArgumentsChanged();
         }
 
-        private void SetStateOfContextLinesButtons()
+        private void _continuousScrollEventManager_BottomScrollReached(object sender, EventArgs e)
+            => BottomScrollReached?.Invoke(sender, e);
+
+        private void _continuousScrollEventManager_TopScrollReached(object sender, EventArgs e)
+            => TopScrollReached?.Invoke(sender, e);
+
+        private void llShowPreview_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
-            increaseNumberOfLines.Enabled = !ShowEntireFile;
-            decreaseNumberOfLines.Enabled = !ShowEntireFile;
-            increaseNumberOfLinesToolStripMenuItem.Enabled = !ShowEntireFile;
-            decreaseNumberOfLinesToolStripMenuItem.Enabled = !ShowEntireFile;
+            _NO_TRANSLATE_lblShowPreview.Hide();
+            ThreadHelper.JoinableTaskFactory.Run(() => _deferShowFunc());
+        }
+
+        private void PictureBox_MouseWheel(object sender, MouseEventArgs e)
+        {
+            var isScrollingTowardTop = e.Delta > 0;
+            var isScrollingTowardBottom = e.Delta < 0;
+
+            if (isScrollingTowardTop)
+            {
+                _continuousScrollEventManager.RaiseTopScrollReached(sender, e);
+            }
+
+            if (isScrollingTowardBottom)
+            {
+                _continuousScrollEventManager.RaiseBottomScrollReached(sender, e);
+            }
+        }
+
+        private void OnUICommandsSourceSet(object sender, GitUICommandsSourceEventArgs e)
+        {
+            UICommandsSource.UICommandsChanged += OnUICommandsChanged;
+            OnUICommandsChanged(UICommandsSource, null);
         }
 
         private void TreatAllFilesAsTextToolStripMenuItemClick(object sender, EventArgs e)
@@ -1129,6 +1315,11 @@ namespace GitUI.Editor
             OnExtraDiffArgumentsChanged();
         }
 
+        /// <summary>
+        /// Copy selected text, excluding diff added/deleted information
+        /// </summary>
+        /// <param name="sender">sender object</param>
+        /// <param name="e">event args</param>
         private void CopyToolStripMenuItemClick(object sender, EventArgs e)
         {
             string code = internalFileViewer.GetSelectedText();
@@ -1138,18 +1329,19 @@ namespace GitUI.Editor
                 return;
             }
 
-            if (_currentViewIsPatch)
+            if (IsDiffView(_viewMode))
             {
-                // add artificial space if selected text is not starting from line beginning, it will be removed later
                 int pos = internalFileViewer.GetSelectionPosition();
                 string fileText = internalFileViewer.GetText();
                 int hpos = fileText.IndexOf("\n@@");
 
                 // if header is selected then don't remove diff extra chars
+                // for range-diff, copy all info (hpos will never match)
                 if (hpos <= pos)
                 {
                     if (pos > 0)
                     {
+                        // add artificial space if selected text is not starting from line beginning, it will be removed later
                         if (fileText[pos - 1] != '\n')
                         {
                             code = " " + code;
@@ -1162,20 +1354,17 @@ namespace GitUI.Editor
                 }
             }
 
-            ClipboardUtil.TrySetText(DoAutoCRLF(code));
+            ClipboardUtil.TrySetText(code.AdjustLineEndings(Module.EffectiveConfigFile.core.autocrlf.Value));
 
             return;
 
             string RemovePrefix(string line)
             {
-                var isCombinedDiff = DiffHighlightService.IsCombinedDiff(internalFileViewer.GetText());
-                var specials = isCombinedDiff ? new[] { "  ", "++", "+ ", " +", "--", "- ", " -" }
-                    : new[] { " ", "-", "+" };
-
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    return line;
-                }
+                var specials = _viewMode == ViewMode.RangeDiff
+                    ? _rangeDiffFullPrefixes
+                    : DiffHighlightService.IsCombinedDiff(internalFileViewer.GetText())
+                        ? _combinedDiffFullPrefixes
+                        : _normalDiffFullPrefixes;
 
                 foreach (var special in specials.Where(line.StartsWith))
                 {
@@ -1186,6 +1375,11 @@ namespace GitUI.Editor
             }
         }
 
+        /// <summary>
+        /// Copy selected text as a patch
+        /// </summary>
+        /// <param name="sender">sender object</param>
+        /// <param name="e">event args</param>
         private void CopyPatchToolStripMenuItemClick(object sender, EventArgs e)
         {
             var selectedText = internalFileViewer.GetSelectedText();
@@ -1204,70 +1398,38 @@ namespace GitUI.Editor
             }
         }
 
-        public string GetSelectedText()
-        {
-            return internalFileViewer.GetSelectedText();
-        }
-
-        public int GetSelectionPosition()
-        {
-            return internalFileViewer.GetSelectionPosition();
-        }
-
-        public int GetSelectionLength()
-        {
-            return internalFileViewer.GetSelectionLength();
-        }
-
-        public void GoToLine(int line)
-        {
-            internalFileViewer.GoToLine(line);
-        }
-
-        public int GetLineFromVisualPosY(int visualPosY)
-        {
-            return internalFileViewer.GetLineFromVisualPosY(visualPosY);
-        }
-
-        public string GetLineText(int line)
-        {
-            return internalFileViewer.GetLineText(line);
-        }
-
-        public void HighlightLine(int line, Color color)
-        {
-            internalFileViewer.HighlightLine(line, color);
-        }
-
-        public void HighlightLines(int startLine, int endLine, Color color)
-        {
-            internalFileViewer.HighlightLines(startLine, endLine, color);
-        }
-
-        public void ClearHighlighting()
-        {
-            internalFileViewer.ClearHighlighting();
-        }
-
+        /// <summary>
+        /// Go to next change
+        /// For normal diffs, this is the next diff
+        /// For range-diff, it is the next commit summary header
+        /// </summary>
+        /// <param name="sender">sender object</param>
+        /// <param name="e">event args</param>
         private void NextChangeButtonClick(object sender, EventArgs e)
         {
             Focus();
 
-            var currentVisibleLine = internalFileViewer.LineAtCaret;
-            var totalNumberOfLines = internalFileViewer.TotalNumberOfLines;
-            var emptyLineCheck = false;
+            var inChange = _viewMode == ViewMode.RangeDiff
+                ? _rangeDiffPrefixes
+                : DiffHighlightService.IsCombinedDiff(internalFileViewer.GetText())
+                    ? _combinedDiffPrefixes
+                    : _normalDiffPrefixes;
 
-            // skip the first pseudo-change containing the file names
-            var startLine = Math.Max(4, currentVisibleLine + 1);
+            // skip the first pseudo-change containing the file names for normal diffs
+            var headerEndLine = _viewMode == ViewMode.RangeDiff ? 0 : 4;
+            var currentVisibleLine = internalFileViewer.LineAtCaret;
+            var startLine = Math.Max(headerEndLine, currentVisibleLine + 1);
+            var totalNumberOfLines = internalFileViewer.TotalNumberOfLines;
+            var emptyLineCheck = _viewMode == ViewMode.RangeDiff;
             for (var line = startLine; line < totalNumberOfLines; line++)
             {
                 var lineContent = internalFileViewer.GetLineText(line);
 
-                if (IsDiffLine(internalFileViewer.GetText(), lineContent))
+                if (_viewMode == ViewMode.RangeDiff ^ lineContent.StartsWithAny(inChange))
                 {
                     if (emptyLineCheck)
                     {
-                        internalFileViewer.FirstVisibleLine = Math.Max(line - 4, 0);
+                        internalFileViewer.FirstVisibleLine = Math.Max(line - headerEndLine, 0);
                         internalFileViewer.LineAtCaret = line;
                         return;
                     }
@@ -1280,15 +1442,6 @@ namespace GitUI.Editor
 
             // Do not go to the end of the file if no change is found
             ////TextEditor.ActiveTextAreaControl.TextArea.TextView.FirstVisibleLine = totalNumberOfLines - TextEditor.ActiveTextAreaControl.TextArea.TextView.VisibleLineCount;
-
-            return;
-
-            bool IsDiffLine(string wholeText, string lineContent)
-            {
-                var isCombinedDiff = DiffHighlightService.IsCombinedDiff(wholeText);
-                return lineContent.StartsWithAny(isCombinedDiff ? new[] { "+", "-", " +", " -" }
-                    : new[] { "+", "-" });
-            }
         }
 
         private void PreviousChangeButtonClick(object sender, EventArgs e)
@@ -1296,33 +1449,52 @@ namespace GitUI.Editor
             Focus();
 
             var startLine = internalFileViewer.LineAtCaret;
-            var emptyLineCheck = false;
+            var inChange = _viewMode == ViewMode.RangeDiff
+                ? _rangeDiffPrefixes
+                : DiffHighlightService.IsCombinedDiff(internalFileViewer.GetText())
+                    ? _combinedDiffPrefixes
+                    : _normalDiffPrefixes;
 
             // go to the top of change block
-            while (startLine > 0 &&
-                internalFileViewer.GetLineText(startLine).StartsWithAny(new[] { "+", "-" }))
+            if (_viewMode == ViewMode.RangeDiff)
+            {
+                // Start checking line above current
+                startLine--;
+            }
+
+            var headerEndLine = _viewMode == ViewMode.RangeDiff ? 0 : 4;
+            while (startLine > headerEndLine &&
+                   internalFileViewer.GetLineText(startLine).StartsWithAny(inChange))
             {
                 startLine--;
             }
 
-            for (var line = startLine; line > 0; line--)
+            if (_viewMode == ViewMode.RangeDiff)
+            {
+                internalFileViewer.FirstVisibleLine = startLine;
+                internalFileViewer.LineAtCaret = startLine;
+                return;
+            }
+
+            var emptyLineCheck = false;
+            for (var line = startLine; line > headerEndLine; line--)
             {
                 var lineContent = internalFileViewer.GetLineText(line);
 
-                if (lineContent.StartsWithAny(new[] { "+", "-" })
-                    && !lineContent.StartsWithAny(new[] { "++", "--" }))
+                if (lineContent.StartsWithAny(inChange))
                 {
                     emptyLineCheck = true;
+                    continue;
                 }
-                else
+
+                if (!emptyLineCheck)
                 {
-                    if (emptyLineCheck)
-                    {
-                        internalFileViewer.FirstVisibleLine = Math.Max(0, line - 3);
-                        internalFileViewer.LineAtCaret = line + 1;
-                        return;
-                    }
+                    continue;
                 }
+
+                internalFileViewer.FirstVisibleLine = Math.Max(0, line - 3);
+                internalFileViewer.LineAtCaret = line + 1;
+                return;
             }
 
             // Do not go to the start of the file if no change is found
@@ -1344,77 +1516,9 @@ namespace GitUI.Editor
             AppSettings.ShowNonPrintingChars = showNonPrintChars.Checked;
         }
 
-        private void ToggleNonPrintingChars(bool show)
-        {
-            internalFileViewer.ShowEOLMarkers = show;
-            internalFileViewer.ShowSpaces = show;
-            internalFileViewer.ShowTabs = show;
-        }
-
         private void FindToolStripMenuItemClick(object sender, EventArgs e)
         {
             internalFileViewer.Find();
-        }
-
-        #region Hotkey commands
-
-        public static readonly string HotkeySettingsName = "FileViewer";
-
-        internal enum Commands
-        {
-            Find = 0,
-            FindNextOrOpenWithDifftool = 8,
-            FindPrevious = 9,
-            GoToLine = 1,
-            IncreaseNumberOfVisibleLines = 2,
-            DecreaseNumberOfVisibleLines = 3,
-            ShowEntireFile = 4,
-            TreatFileAsText = 5,
-            NextChange = 6,
-            PreviousChange = 7,
-            NextOccurrence = 10,
-            PreviousOccurrence = 11
-        }
-
-        protected override CommandStatus ExecuteCommand(int cmd)
-        {
-            var command = (Commands)cmd;
-
-            switch (command)
-            {
-                case Commands.Find: internalFileViewer.Find(); break;
-                case Commands.FindNextOrOpenWithDifftool: ThreadHelper.JoinableTaskFactory.RunAsync(() => internalFileViewer.FindNextAsync(searchForwardOrOpenWithDifftool: true)); break;
-                case Commands.FindPrevious: ThreadHelper.JoinableTaskFactory.RunAsync(() => internalFileViewer.FindNextAsync(searchForwardOrOpenWithDifftool: false)); break;
-                case Commands.GoToLine: goToLineToolStripMenuItem_Click(null, null); break;
-                case Commands.IncreaseNumberOfVisibleLines: IncreaseNumberOfLinesToolStripMenuItemClick(null, null); break;
-                case Commands.DecreaseNumberOfVisibleLines: DecreaseNumberOfLinesToolStripMenuItemClick(null, null); break;
-                case Commands.ShowEntireFile: ShowEntireFileToolStripMenuItemClick(null, null); break;
-                case Commands.TreatFileAsText: TreatAllFilesAsTextToolStripMenuItemClick(null, null); break;
-                case Commands.NextChange: NextChangeButtonClick(null, null); break;
-                case Commands.PreviousChange: PreviousChangeButtonClick(null, null); break;
-                case Commands.NextOccurrence: internalFileViewer.GoToNextOccurrence(); break;
-                case Commands.PreviousOccurrence: internalFileViewer.GoToPreviousOccurrence(); break;
-                default: return base.ExecuteCommand(cmd);
-            }
-
-            return true;
-        }
-
-        #endregion
-
-        public void Clear()
-        {
-            ThreadHelper.JoinableTaskFactory.Run(() => ViewTextAsync("", ""));
-        }
-
-        public bool HasAnyPatches()
-        {
-            return internalFileViewer.GetText() != null && internalFileViewer.GetText().Contains("@@");
-        }
-
-        public void SetFileLoader(GetNextFileFnc fileLoader)
-        {
-            internalFileViewer.SetFileLoader(fileLoader);
         }
 
         private void encodingToolStripComboBox_SelectedIndexChanged(object sender, EventArgs e)
@@ -1463,68 +1567,6 @@ namespace GitUI.Editor
                     GoToLine(formGoToLine.GetLineNumber());
                 }
             }
-        }
-
-        private void CopyNotStartingWith(char startChar)
-        {
-            string code = internalFileViewer.GetSelectedText();
-            bool noSelection = false;
-
-            if (string.IsNullOrEmpty(code))
-            {
-                code = internalFileViewer.GetText();
-                noSelection = true;
-            }
-
-            if (_currentViewIsPatch)
-            {
-                // add artificial space if selected text is not starting from line beginning, it will be removed later
-                int pos = noSelection ? 0 : internalFileViewer.GetSelectionPosition();
-                string fileText = internalFileViewer.GetText();
-
-                if (pos > 0 && fileText[pos - 1] != '\n')
-                {
-                    code = " " + code;
-                }
-
-                var lines = code.Split('\n')
-                    .Where(s => s.Length == 0 || s[0] != startChar || (s.Length > 2 && s[1] == s[0] && s[2] == s[0]));
-                var hpos = fileText.IndexOf("\n@@");
-
-                // if header is selected then don't remove diff extra chars
-                if (hpos <= pos)
-                {
-                    char[] specials = { ' ', '-', '+' };
-                    lines = lines.Select(s => s.Length > 0 && specials.Any(c => c == s[0]) ? s.Substring(1) : s);
-                }
-
-                code = string.Join("\n", lines);
-            }
-
-            ClipboardUtil.TrySetText(DoAutoCRLF(code));
-        }
-
-        private string DoAutoCRLF(string text)
-        {
-            if (Module.EffectiveConfigFile.core.autocrlf.ValueOrDefault != AutoCRLFType.@true)
-            {
-                return text;
-            }
-
-            if (text.Contains("\r\n"))
-            {
-                // AutoCRLF is set to true but the text contains windows endings.
-                // Maybe the user that committed the file had another AutoCRLF setting.
-                return text.Replace("\r\n", Environment.NewLine);
-            }
-
-            if (text.Contains("\r"))
-            {
-                // Old MAC lines (pre OS X). See "if (text.Contains("\r\n"))" above.
-                return text.Replace("\r", Environment.NewLine);
-            }
-
-            return text.Replace("\n", Environment.NewLine);
         }
 
         private void copyNewVersionToolStripMenuItem_Click(object sender, EventArgs e)
@@ -1581,35 +1623,6 @@ namespace GitUI.Editor
             applySelectedLines(GetSelectionPosition(), GetSelectionLength(), reverse: false);
         }
 
-        public void CherryPickAllChanges()
-        {
-            if (GetText().Length > 0)
-            {
-                applySelectedLines(0, GetText().Length, reverse: false);
-            }
-        }
-
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                UICommandsSourceSet -= OnUICommandsSourceSet;
-                _async.Dispose();
-                components?.Dispose();
-
-                if (TryGetUICommands(out var uiCommands))
-                {
-                    uiCommands.PostSettings -= UICommands_PostSettings;
-                }
-            }
-
-            base.Dispose(disposing);
-        }
-
         private void settingsButton_Click(object sender, EventArgs e)
         {
             UICommands.StartSettingsDialog(ParentForm, DiffViewerSettingsPage.GetPageReference());
@@ -1634,6 +1647,52 @@ namespace GitUI.Editor
             OnIgnoreWhitespaceChanged();
             OnExtraDiffArgumentsChanged();
         }
+
+        #region Hotkey commands
+
+        public static readonly string HotkeySettingsName = "FileViewer";
+
+        internal enum Commands
+        {
+            Find = 0,
+            FindNextOrOpenWithDifftool = 8,
+            FindPrevious = 9,
+            GoToLine = 1,
+            IncreaseNumberOfVisibleLines = 2,
+            DecreaseNumberOfVisibleLines = 3,
+            ShowEntireFile = 4,
+            TreatFileAsText = 5,
+            NextChange = 6,
+            PreviousChange = 7,
+            NextOccurrence = 10,
+            PreviousOccurrence = 11
+        }
+
+        protected override CommandStatus ExecuteCommand(int cmd)
+        {
+            var command = (Commands)cmd;
+
+            switch (command)
+            {
+                case Commands.Find: internalFileViewer.Find(); break;
+                case Commands.FindNextOrOpenWithDifftool: ThreadHelper.JoinableTaskFactory.RunAsync(() => internalFileViewer.FindNextAsync(searchForwardOrOpenWithDifftool: true)); break;
+                case Commands.FindPrevious: ThreadHelper.JoinableTaskFactory.RunAsync(() => internalFileViewer.FindNextAsync(searchForwardOrOpenWithDifftool: false)); break;
+                case Commands.GoToLine: goToLineToolStripMenuItem_Click(null, null); break;
+                case Commands.IncreaseNumberOfVisibleLines: IncreaseNumberOfLinesToolStripMenuItemClick(null, null); break;
+                case Commands.DecreaseNumberOfVisibleLines: DecreaseNumberOfLinesToolStripMenuItemClick(null, null); break;
+                case Commands.ShowEntireFile: ShowEntireFileToolStripMenuItemClick(null, null); break;
+                case Commands.TreatFileAsText: TreatAllFilesAsTextToolStripMenuItemClick(null, null); break;
+                case Commands.NextChange: NextChangeButtonClick(null, null); break;
+                case Commands.PreviousChange: PreviousChangeButtonClick(null, null); break;
+                case Commands.NextOccurrence: internalFileViewer.GoToNextOccurrence(); break;
+                case Commands.PreviousOccurrence: internalFileViewer.GoToPreviousOccurrence(); break;
+                default: return base.ExecuteCommand(cmd);
+            }
+
+            return true;
+        }
+
+        #endregion
 
         internal TestAccessor GetTestAccessor() => new TestAccessor(this);
 
@@ -1662,10 +1721,6 @@ namespace GitUI.Editor
                 set => _fileViewer.ShowSyntaxHighlightingInDiff = value;
             }
 
-            internal void IgnoreWhitespaceAtEolToolStripMenuItem_Click(object sender, EventArgs e) => _fileViewer.IgnoreWhitespaceAtEolToolStripMenuItem_Click(sender, e);
-            internal void IgnoreWhitespaceChangesToolStripMenuItemClick(object sender, EventArgs e) => _fileViewer.IgnoreWhitespaceChangesToolStripMenuItemClick(sender, e);
-            internal void IgnoreAllWhitespaceChangesToolStripMenuItem_Click(object sender, EventArgs e) => _fileViewer.IgnoreAllWhitespaceChangesToolStripMenuItem_Click(sender, e);
-
             public ToolStripButton IgnoreWhitespaceAtEolButton => _fileViewer.ignoreWhitespaceAtEol;
             public ToolStripMenuItem IgnoreWhitespaceAtEolMenuItem => _fileViewer.ignoreWhitespaceAtEolToolStripMenuItem;
 
@@ -1674,16 +1729,10 @@ namespace GitUI.Editor
 
             public ToolStripButton IgnoreAllWhitespacesButton => _fileViewer.ignoreAllWhitespaces;
             public ToolStripMenuItem IgnoreAllWhitespacesMenuItem => _fileViewer.ignoreAllWhitespaceChangesToolStripMenuItem;
-        }
 
-        public void SetGitBlameGutter(IEnumerable<GitBlameEntry> gitBlameEntries)
-        {
-            internalFileViewer.ShowGutterAvatars = AppSettings.BlameShowAuthorAvatar;
-
-            if (AppSettings.BlameShowAuthorAvatar)
-            {
-                internalFileViewer.SetGitBlameGutter(gitBlameEntries);
-            }
+            internal void IgnoreWhitespaceAtEolToolStripMenuItem_Click(object sender, EventArgs e) => _fileViewer.IgnoreWhitespaceAtEolToolStripMenuItem_Click(sender, e);
+            internal void IgnoreWhitespaceChangesToolStripMenuItemClick(object sender, EventArgs e) => _fileViewer.IgnoreWhitespaceChangesToolStripMenuItemClick(sender, e);
+            internal void IgnoreAllWhitespaceChangesToolStripMenuItem_Click(object sender, EventArgs e) => _fileViewer.IgnoreAllWhitespaceChangesToolStripMenuItem_Click(sender, e);
         }
     }
 }

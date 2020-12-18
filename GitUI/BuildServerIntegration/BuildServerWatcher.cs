@@ -14,6 +14,7 @@ using System.Windows.Forms;
 using GitCommands;
 using GitCommands.Config;
 using GitCommands.Remotes;
+using GitUI.CommandsDialogs.SettingsDialog.Pages;
 using GitUI.HelperDialogs;
 using GitUI.UserControls;
 using GitUI.UserControls.RevisionGrid;
@@ -97,7 +98,7 @@ namespace GitUI.BuildServerIntegration
                     {
                         fullDayObservable.OnErrorResumeNext(fullObservable)
                                          .OnErrorResumeNext(Observable.Empty<BuildInfo>()
-                                                                      .DelaySubscription(TimeSpan.FromMinutes(1))
+                                                                      .DelaySubscription(LongPollInterval)
                                                                       .OnErrorResumeNext(fromNowObservable)
                                                                       .Retry()
                                                                       .Repeat())
@@ -306,12 +307,12 @@ namespace GitUI.BuildServerIntegration
 
             var buildServerSettings = _module().EffectiveSettings.BuildServer;
 
-            if (!buildServerSettings.EnableIntegration.ValueOrDefault)
+            if (!buildServerSettings.EnableIntegration.Value)
             {
                 return null;
             }
 
-            var buildServerType = buildServerSettings.Type.ValueOrDefault;
+            var buildServerType = buildServerSettings.Type.Value;
             if (string.IsNullOrEmpty(buildServerType))
             {
                 return null;
@@ -333,7 +334,15 @@ namespace GitUI.BuildServerIntegration
 
                     var buildServerAdapter = export.Value;
 
-                    buildServerAdapter.Initialize(this, buildServerSettings.TypeSettings, objectId => _revisionGrid.GetRevision(objectId) != null);
+                    buildServerAdapter.Initialize(this, buildServerSettings.TypeSettings,
+                        () =>
+                        {
+                            // To run the `StartSettingsDialog()` in the UI Thread
+                            _revisionGrid.Invoke((Action)(() =>
+                            {
+                                _revisionGrid.UICommands.StartSettingsDialog(typeof(BuildServerIntegrationSettingsPage));
+                            }));
+                        }, objectId => _revisionGrid.GetRevision(objectId) != null);
                     return buildServerAdapter;
                 }
                 catch (InvalidOperationException ex)

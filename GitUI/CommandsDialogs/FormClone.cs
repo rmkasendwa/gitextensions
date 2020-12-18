@@ -8,15 +8,17 @@ using System.Windows.Forms;
 using GitCommands;
 using GitCommands.Config;
 using GitCommands.Git;
+using GitCommands.Git.Commands;
 using GitCommands.UserRepositoryHistory;
 using GitExtUtils.GitUI;
 using GitExtUtils.GitUI.Theming;
+using GitUI.HelperDialogs;
 using GitUIPluginInterfaces;
 using ResourceManager;
 
 namespace GitUI.CommandsDialogs
 {
-    public partial class FormClone : GitModuleForm
+    public partial class FormClone : GitExtensionsDialog
     {
         private readonly TranslationString _infoNewRepositoryLocation = new TranslationString("The repository will be cloned to a new directory located here:" + Environment.NewLine + "{0}");
         private readonly TranslationString _infoDirectoryExists = new TranslationString("(Directory already exists)");
@@ -42,10 +44,16 @@ namespace GitUI.CommandsDialogs
         }
 
         public FormClone(GitUICommands commands, string url, bool openedFromProtocolHandler, EventHandler<GitModuleEventArgs> gitModuleChanged)
-            : base(commands)
+            : base(commands, enablePositionRestore: false)
         {
             _gitModuleChanged = gitModuleChanged;
             InitializeComponent();
+
+            // work-around the designer bug that can't add controls to FlowLayoutPanel
+            ControlsPanel.Controls.Add(Ok);
+            ControlsPanel.Controls.Add(LoadSSHKey);
+            AcceptButton = Ok;
+
             InitializeComplete();
             _openedFromProtocolHandler = openedFromProtocolHandler;
             _url = url;
@@ -67,8 +75,10 @@ namespace GitUI.CommandsDialogs
             base.OnRuntimeLoad(e);
 
             // scale up for hi DPI
-            MaximumSize = DpiUtil.Scale(new Size(950, 375));
-            MinimumSize = DpiUtil.Scale(new Size(450, 375));
+            MaximumSize = DpiUtil.Scale(new Size(950, 398));
+            MinimumSize = DpiUtil.Scale(new Size(450, 398));
+            Size = new Size((tpnlMain.Left * 2) + tpnlMain.Width + /* right margin */DpiUtil.Scale(16), Height);
+            tpnlMain.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             ThreadHelper.JoinableTaskFactory.Run(async () =>
             {
@@ -245,7 +255,7 @@ namespace GitUI.CommandsDialogs
                                                           CentralRepository.Checked,
                                                           cbIntializeAllSubmodules.Checked,
                                                           branch, depth, isSingleBranch, cbLfs.Checked);
-                using (var fromProcess = new FormRemoteProcess(Module, AppSettings.GitCommand, cloneCmd))
+                using (var fromProcess = new FormRemoteProcess(UICommands, AppSettings.GitCommand, cloneCmd))
                 {
                     fromProcess.SetUrlTryingToConnect(sourceRepo);
                     fromProcess.ShowDialog(this);
@@ -327,7 +337,7 @@ namespace GitUI.CommandsDialogs
 
         private void FormCloneLoad(object sender, EventArgs e)
         {
-            if (!GitCommandHelpers.Plink())
+            if (!GitSshHelpers.Plink())
             {
                 LoadSSHKey.Visible = false;
             }
@@ -403,7 +413,7 @@ namespace GitUI.CommandsDialogs
             {
                 string remoteUrl = _NO_TRANSLATE_From.Text;
 
-                if (FormRemoteProcess.AskForCacheHostkey(this, Module, remoteUrl))
+                if (FormRemoteProcess.AskForCacheHostkey(this, remoteUrl))
                 {
                     LoadBranches();
                 }

@@ -10,7 +10,9 @@ using System.Windows.Forms;
 using GitCommands;
 using GitExtUtils;
 using GitExtUtils.GitUI;
+using GitUI.CommandsDialogs.BrowseDialog;
 using GitUI.Properties;
+using GitUI.UserControls;
 using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 using ResourceManager;
@@ -53,7 +55,7 @@ namespace GitUI.CommandsDialogs
             _formBrowseMenus.ResetMenuCommandSets();
             _formBrowseMenus.AddMenuCommandSet(MainMenuItem.NavigateMenu, FileChanges.MenuCommands.NavigateMenuCommands);
             _formBrowseMenus.AddMenuCommandSet(MainMenuItem.ViewMenu, FileChanges.MenuCommands.ViewMenuCommands);
-            _formBrowseMenus.InsertAdditionalMainMenuItems(toolStripSeparator4);
+            _formBrowseMenus.InsertRevisionGridMainMenuItems(toolStripSeparator4);
 
             _commitDataManager = new CommitDataManager(() => Module);
             _fullPathResolver = new FullPathResolver(() => Module.WorkingDir);
@@ -92,7 +94,7 @@ namespace GitUI.CommandsDialogs
             }
         }
 
-        public FormFileHistory(GitUICommands commands, string fileName, GitRevision revision = null, bool filterByRevision = false)
+        public FormFileHistory(GitUICommands commands, string fileName, GitRevision revision = null, bool filterByRevision = false, bool showBlame = false)
             : this(commands)
         {
             FileChanges.InitialObjectId = revision?.ObjectId;
@@ -147,6 +149,8 @@ namespace GitUI.CommandsDialogs
             {
                 _filterBranchHelper.SetBranchFilter(revision.Guid, false);
             }
+
+            tabControl1.SelectedTab = blameTabExists && showBlame ? BlameTab : DiffTab;
         }
 
         /// <summary>
@@ -169,9 +173,6 @@ namespace GitUI.CommandsDialogs
 
             base.Dispose(disposing);
         }
-
-        public void SelectBlameTab() => tabControl1.SelectedTab = BlameTab;
-        public void SelectDiffTab() => tabControl1.SelectedTab = DiffTab;
 
         protected override void OnRuntimeLoad(EventArgs e)
         {
@@ -236,7 +237,7 @@ namespace GitUI.CommandsDialogs
                         "--format=\"%n\"",
                         "--name-only",
                         "--follow",
-                        GitCommandHelpers.FindRenamesAndCopiesOpts(),
+                        FindRenamesAndCopiesOpts(),
                         "--",
                         fileName.Quote()
                     };
@@ -260,13 +261,13 @@ namespace GitUI.CommandsDialogs
 
                     // here we need --name-only to get the previous filenames in the revision graph
                     res.path = listOfFileNames.ToString();
-                    res.revision += " --name-only --parents" + GitCommandHelpers.FindRenamesAndCopiesOpts();
+                    res.revision += $" --name-only --parents{FindRenamesAndCopiesOpts()}";
                 }
                 else if (AppSettings.FollowRenamesInFileHistory)
                 {
                     // history of a directory
                     // --parents doesn't work with --follow enabled, but needed to graph a filtered log
-                    res.revision = " " + GitCommandHelpers.FindRenamesOpt() + " --follow --parents";
+                    res.revision = $" {FindRenamesOpt()} --follow --parents";
                 }
                 else
                 {
@@ -281,6 +282,23 @@ namespace GitUI.CommandsDialogs
 
                 return res;
             }
+        }
+
+        // returns " --find-renames=..." according to app settings
+        private static ArgumentString FindRenamesOpt()
+        {
+            return AppSettings.FollowRenamesInFileHistoryExactOnly
+                ? " --find-renames=\"100%\""
+                : " --find-renames";
+        }
+
+        // returns " --find-renames=... --find-copies=..." according to app settings
+        private static ArgumentString FindRenamesAndCopiesOpts()
+        {
+            var findCopies = AppSettings.FollowRenamesInFileHistoryExactOnly
+                ? " --find-copies=\"100%\""
+                : " --find-copies";
+            return FindRenamesOpt() + findCopies;
         }
 
         private void FileChangesSelectionChanged(object sender, EventArgs e)
@@ -379,10 +397,8 @@ namespace GitUI.CommandsDialogs
                     IsSubmodule = GitModule.IsValidGitWorkingDir(_fullPathResolver.Resolve(fileName))
                 };
                 var revisions = FileChanges.GetSelectedRevisions();
-                var selectedRev = revisions.FirstOrDefault();
-                var firstId = revisions.Skip(1).LastOrDefault()?.ObjectId ?? selectedRev?.FirstParentGuid;
-                Diff.ViewChangesAsync(firstId, selectedRev, file,
-                    defaultText: "You need to select at least one revision to view diff.");
+                var item = new FileStatusItem(firstRev: revisions.Skip(1).LastOrDefault(), secondRev: revisions.FirstOrDefault(), file);
+                Diff.ViewChangesAsync(item, defaultText: "You need to select at least one revision to view diff.");
             }
             else if (tabControl1.SelectedTab == CommitInfoTabPage)
             {
@@ -431,8 +447,13 @@ namespace GitUI.CommandsDialogs
                     orgFileName = FileName;
                 }
 
-                string fullName = _fullPathResolver.Resolve(orgFileName.ToNativePath());
+                string fullName = _fullPathResolver.Resolve(orgFileName);
+                if (string.IsNullOrWhiteSpace(fullName))
+                {
+                    return;
+                }
 
+                fullName = fullName.ToNativePath();
                 using (var fileDialog = new SaveFileDialog
                 {
                     InitialDirectory = Path.GetDirectoryName(fullName),
@@ -583,7 +604,7 @@ namespace GitUI.CommandsDialogs
                 CommitData commit = _commitDataManager.GetCommitData(e.Data, out _);
                 if (commit != null)
                 {
-                    FileChanges.SetSelectedRevision(new GitRevision(commit.ObjectId));
+                    FileChanges.SetSelectedRevision(commit.ObjectId);
                 }
             }
             else if (e.Command == "navigatebackward")
@@ -711,6 +732,11 @@ namespace GitUI.CommandsDialogs
             AppSettings.BlameShowAuthorAvatar = !AppSettings.BlameShowAuthorAvatar;
             showAuthorAvatarToolStripMenuItem.Checked = AppSettings.BlameShowAuthorAvatar;
             UpdateSelectedFileViewers(true);
+        }
+
+        private void GitcommandLogToolStripMenuItemClick(object sender, EventArgs e)
+        {
+            FormGitCommandLog.ShowOrActivate(this);
         }
     }
 }

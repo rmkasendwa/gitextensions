@@ -132,6 +132,54 @@ namespace GitCommands
             }
         }
 
+        /// <summary>
+        /// Wrapper for Path.Combine
+        /// </summary>
+        /// <remark>
+        /// Similar to the .NET Core 2.1 variant, except that null is returned if Windows
+        /// invalid characters (that may be accepted in Git or other filesystems)
+        /// are in the paths instead of a possible path (the OS or file system will throw
+        /// if the paths are invalid).
+        /// </remark>
+        /// <param name="path1">initial part</param>
+        /// <param name="path2">second part</param>
+        /// <returns>path if it can be combined, null otherwise</returns>
+        [CanBeNull]
+        public static string Combine(string path1, string path2)
+        {
+            try
+            {
+                return Path.Combine(path1, path2);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Wrapper for Path.GetExtension
+        /// </summary>
+        /// <remark>
+        /// <see cref="Combine"/> for motivation.
+        /// </remark>
+        /// <param name="path">path to check</param>
+        /// <returns>path if it can be combined, empty otherwise</returns>
+        [NotNull]
+        public static string GetExtension(string path)
+        {
+            try
+            {
+                return Path.GetExtension(path);
+            }
+            catch (ArgumentException)
+            {
+                // This could return part after a '.' using string commands,
+                // but wait for .NET Core with this edge case
+                return string.Empty;
+            }
+        }
+
         [NotNull]
         public static string Resolve([NotNull] string path, string relativePath = "")
         {
@@ -185,22 +233,6 @@ namespace GitCommands
             return path.ToLower().StartsWith(@"\\wsl$\");
         }
 
-        [ContractAnnotation("=>false,posixPath:null")]
-        [ContractAnnotation("=>true,posixPath:notnull")]
-        public static bool TryConvertWindowsPathToPosix([NotNull] string path, out string posixPath)
-        {
-            var directoryInfo = new DirectoryInfo(path);
-
-            if (!directoryInfo.Exists)
-            {
-                posixPath = null;
-                return false;
-            }
-
-            posixPath = "/" + directoryInfo.FullName.ToPosixPath().Remove(1, 1);
-            return true;
-        }
-
         [NotNull]
         public static string GetRepositoryName([CanBeNull] string repositoryUrl)
         {
@@ -239,7 +271,7 @@ namespace GitCommands
 
                 foreach (var path in EnvironmentPathsProvider.GetEnvironmentValidPaths())
                 {
-                    fullPath = Path.Combine(path, fileName);
+                    fullPath = Combine(path, fileName);
                     if (File.Exists(fullPath))
                     {
                         return true;
@@ -267,7 +299,7 @@ namespace GitCommands
                     return true;
                 }
 
-                shellPath = Path.Combine(AppSettings.GitBinDir, shell);
+                shellPath = Combine(AppSettings.GitBinDir, shell);
                 if (File.Exists(shellPath))
                 {
                     return true;
@@ -385,7 +417,7 @@ namespace GitCommands
                     return null;
                 }
 
-                var path = Path.Combine(envVarFolder, location);
+                var path = Combine(envVarFolder, location);
                 if (!Directory.Exists(path))
                 {
                     return null;
@@ -396,7 +428,7 @@ namespace GitCommands
 
             string FindFile(string location, string fileName1)
             {
-                string fullName = Path.Combine(location, fileName1);
+                string fullName = Combine(location, fileName1);
                 if (File.Exists(fullName))
                 {
                     return fullName;

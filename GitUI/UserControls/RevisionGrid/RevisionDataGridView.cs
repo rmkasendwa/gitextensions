@@ -186,23 +186,13 @@ namespace GitUI.UserControls.RevisionGrid
 
         // Contains the object Id's that will be selected as soon as all of them have been loaded.
         // The object Id's are in the order in which they were originally selected.
-        public IReadOnlyList<ObjectId> ToBeSelectedObjectIds { get; set; } = new List<ObjectId>();
+        public IReadOnlyList<ObjectId> ToBeSelectedObjectIds { get; set; } = Array.Empty<ObjectId>();
 
-        // The ToBeSelectedObjectIds's should be converted to indexes.
-        // Since revisions are read in order, this list stores those indexes along with information on the order in which they were selected.
-        private List<RowIndexToBeSelectedWithOrderInfo> ToBeSelectedRowIndexes { get; set; } = new List<RowIndexToBeSelectedWithOrderInfo>();
-
-        private class RowIndexToBeSelectedWithOrderInfo
-        {
-            public int RowIndex { get; set; }
-
-            // Order in which the row should be selected.
-            public int SelectionOrder { get; set; }
-        }
+        private int _loadedToBeSelectedRevisionsCount = 0;
 
         public bool HasSelection()
         {
-            return ToBeSelectedObjectIds.Any() || ToBeSelectedRowIndexes.Any() || SelectedRows.Count > 0;
+            return ToBeSelectedObjectIds.Any() || SelectedRows.Count > 0;
         }
 
         [CanBeNull]
@@ -246,14 +236,33 @@ namespace GitUI.UserControls.RevisionGrid
 
         private Color GetForeground(DataGridViewElementStates state, int rowIndex)
         {
-            if (state.HasFlag(DataGridViewElementStates.Selected))
+            bool isNonRelativeGray = AppSettings.RevisionGraphDrawNonRelativesTextGray && !RowIsRelative(rowIndex);
+            bool isSelected = state.HasFlag(DataGridViewElementStates.Selected);
+            return (isNonRelativeGray, isSelected) switch
             {
-                return SystemColors.HighlightText;
-            }
+                (isNonRelativeGray: false, isSelected: false) => SystemColors.ControlText,
+                (isNonRelativeGray: false, isSelected: true) => SystemColors.HighlightText,
+                (isNonRelativeGray: true, isSelected: false) => SystemColors.GrayText,
 
-            return AppSettings.RevisionGraphDrawNonRelativesTextGray && !RowIsRelative(rowIndex)
-                ? SystemColors.GrayText
-                : SystemColors.ControlText;
+                // (isGray: true, isSelected: true)
+                _ => getHighlightedGrayTextColor()
+            };
+        }
+
+        private Color GetCommitBodyForeground(DataGridViewElementStates state, int rowIndex)
+        {
+            bool isNonRelativeGray = AppSettings.RevisionGraphDrawNonRelativesTextGray && !RowIsRelative(rowIndex);
+            bool isSelected = state.HasFlag(DataGridViewElementStates.Selected);
+
+            return (isNonRelativeGray, isSelected) switch
+            {
+                (isNonRelativeGray: false, isSelected: false) => SystemColors.GrayText,
+                (isNonRelativeGray: false, isSelected: true) => getHighlightedGrayTextColor(),
+                (isNonRelativeGray: true, isSelected: false) => getGrayTextColor(degreeOfGrayness: 1.4f),
+
+                // (isGray: true, isSelected: true)
+                _ => getHighlightedGrayTextColor(degreeOfGrayness: 1.4f)
+            };
         }
 
         private Brush GetBackground(DataGridViewElementStates state, int rowIndex, GitRevision revision)
@@ -294,9 +303,11 @@ namespace GitUI.UserControls.RevisionGrid
             {
                 var backBrush = GetBackground(e.State, e.RowIndex, revision);
                 var foreColor = GetForeground(e.State, e.RowIndex);
+                var commitBodyForeColor = GetCommitBodyForeground(e.State, e.RowIndex);
 
                 e.Graphics.FillRectangle(backBrush, e.CellBounds);
-                provider.OnCellPainting(e, revision, _rowHeight, new CellStyle(backBrush, foreColor, _normalFont, _boldFont, _monospaceFont));
+                var cellStyle = new CellStyle(backBrush, foreColor, commitBodyForeColor, _normalFont, _boldFont, _monospaceFont);
+                provider.OnCellPainting(e, revision, _rowHeight, cellStyle);
 
                 e.Handled = true;
             }
@@ -308,13 +319,7 @@ namespace GitUI.UserControls.RevisionGrid
 
             if (ToBeSelectedObjectIds.Contains(revision.ObjectId))
             {
-                var rowIndexToBeSelectedWithOrderInfo = new RowIndexToBeSelectedWithOrderInfo
-                {
-                    RowIndex = _revisionGraph.Count - 1,
-                    SelectionOrder = ToBeSelectedObjectIds.IndexOf(o => o == revision.ObjectId)
-                };
-
-                ToBeSelectedRowIndexes.Add(rowIndexToBeSelectedWithOrderInfo);
+                ++_loadedToBeSelectedRevisionsCount;
             }
 
             UpdateVisibleRowRange();
@@ -332,7 +337,7 @@ namespace GitUI.UserControls.RevisionGrid
             // Set rowcount to 0 first, to ensure it is not possible to select or redraw, since we are about te delete the data
             SetRowCount(0);
             _revisionGraph.Clear();
-            ToBeSelectedRowIndexes = new List<RowIndexToBeSelectedWithOrderInfo>();
+            _loadedToBeSelectedRevisionsCount = 0;
 
             // The graphdata is stored in one of the columnproviders, clear this last
             foreach (var columnProvider in _columnProviders)
@@ -346,6 +351,13 @@ namespace GitUI.UserControls.RevisionGrid
 
             StartBackgroundProcessingTask(cancellationToken);
         }
+
+        /// <summary>
+        /// Checks whether the given hash is present in the graph.
+        /// </summary>
+        /// <param name="objectId">The hash to find.</param>
+        /// <returns><see langword="true"/>, if the given hash if found; otherwise <see langword="false"/>.</returns>
+        public bool Contains(ObjectId objectId) => _revisionGraph.Contains(objectId);
 
         private void StartBackgroundProcessingTask(CancellationToken cancellationToken)
         {
@@ -405,35 +417,36 @@ namespace GitUI.UserControls.RevisionGrid
         private void SelectRowsIfReady(int rowCount)
         {
             // Wait till we have all the row indexes to be selected.
-            if (!ToBeSelectedRowIndexes.Any() || ToBeSelectedRowIndexes.Count < ToBeSelectedObjectIds.Count)
+            if (_loadedToBeSelectedRevisionsCount == 0 || _loadedToBeSelectedRevisionsCount < ToBeSelectedObjectIds.Count)
             {
                 return;
             }
 
-            if (rowCount > ToBeSelectedRowIndexes.Max(ri => ri.RowIndex))
+            foreach (var objectId in ToBeSelectedObjectIds)
             {
                 try
                 {
-                    var rowIndicesToBeSelectedInOriginalOrder = ToBeSelectedRowIndexes.OrderBy(ri => ri.SelectionOrder).Select(ri => ri.RowIndex);
-
-                    foreach (var rowIndexToBeSelected in rowIndicesToBeSelectedInOriginalOrder)
+                    if (!_revisionGraph.TryGetRowIndex(objectId, out int rowIndexToBeSelected) || rowIndexToBeSelected >= rowCount)
                     {
-                        Rows[rowIndexToBeSelected].Selected = true;
-
-                        if (CurrentCell == null)
-                        {
-                            CurrentCell = Rows[rowIndexToBeSelected].Cells[1];
-                        }
+                        return;
                     }
 
-                    // The rows to be selected have just been selected. Prevent from selecting them again.
-                    ToBeSelectedRowIndexes.Clear();
+                    Rows[rowIndexToBeSelected].Selected = true;
+
+                    if (CurrentCell == null)
+                    {
+                        CurrentCell = Rows[rowIndexToBeSelected].Cells[1];
+                    }
                 }
                 catch (ArgumentOutOfRangeException)
                 {
                     // Not worth crashing for. Ignore exception.
                 }
             }
+
+            // The rows to be selected have just been selected. Prevent from selecting them again.
+            _loadedToBeSelectedRevisionsCount = 0;
+            ToBeSelectedObjectIds = Array.Empty<ObjectId>();
         }
 
         private void SetRowCountAndSelectRowsIfReady(int rowCount)
@@ -734,5 +747,15 @@ namespace GitUI.UserControls.RevisionGrid
                 base.OnMouseWheel(e);
             }
         }
+
+        private static Color getHighlightedGrayTextColor(float degreeOfGrayness = 1f) =>
+            ColorHelper.GetHighlightGrayTextColor(
+                backgroundColorName: KnownColor.Control,
+                textColorName: KnownColor.ControlText,
+                highlightColorName: KnownColor.Highlight,
+                degreeOfGrayness);
+
+        private static Color getGrayTextColor(float degreeOfGrayness = 1f) =>
+            ColorHelper.GetGrayTextColor(textColorName: KnownColor.ControlText, degreeOfGrayness);
     }
 }

@@ -15,6 +15,10 @@ image: Visual Studio 2019
 init:
   - ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 
+cache:
+  # preserve "GitExtensions.PluginManager" directory, will be reset if appveyor.yml is modified
+  - .\artifacts\publish\GitExtensions.PluginManager -> appveyor.yml
+
 # Build settings, not to be confused with "before_build" and "after_build".
 # "project" is relative to the original build directory and not influenced by directory changes in "before_build".
 build:
@@ -25,10 +29,6 @@ build:
 
 install:
 - cmd: git submodule update --init --recursive
-- cmd: echo %APPVEYOR_REPO_COMMIT%
-- cmd: echo %APPVEYOR_PULL_REQUEST_HEAD_COMMIT%
-  # if building a temporary merge with master, reset the git revision to the HEAD of the PR, keeping the files of the merge of course
-- cmd: if not "%APPVEYOR_PULL_REQUEST_HEAD_COMMIT%" == "" if not "%APPVEYOR_PULL_REQUEST_HEAD_COMMIT%" == "%APPVEYOR_REPO_COMMIT%" git reset --soft "%APPVEYOR_PULL_REQUEST_HEAD_COMMIT%" --
 - cmd: echo /logger:"%ProgramFiles%\AppVeyor\BuildAgent\Appveyor.MSBuildLogger.dll">> Directory.Build.rsp
 - cmd: |-
     cd scripts
@@ -44,17 +44,37 @@ build_script:
       & .\scripts\Mark-RepoClean.ps1
     }
 
+    # if building a temporary merge with master, soft reset to the PR commit so the build contains the PR's hash instead of the merge-commit's hash
+    if ($env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT -and ($env:APPVEYOR_REPO_COMMIT -ne $env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT))
+    {
+      git reset --soft "$env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT" --
+    }
+
     # build
-    & .\cibuild.cmd -restore -build -buildNative -loc
+    & .\cibuild.cmd -restore -build -buildNative -logFileName build.binlog
     if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
+
+    # if we have reset above, we need to restore the merge commit, otherwise the loc verification step will fail
+    # refer to https://github.com/gitextensions/gitextensions/issues/7979
+    if ($env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT) {
+      git config user.email "gitextensions@github.com"
+      git config user.name "Git Extensions"
+      git commit -m "restore merge commit"
+    }
+
+    # it would be nice to run '.\cibuild.cmd -loc -logFileName localise.binlog /p:NoBuild=true' but it doesn't work without `-build` switch :\
+    Push-Location .\GitExtensions
+    msbuild /p:Configuration=Release /t:_UpdateEnglishTranslations /p:RunTranslationApp=true /p:ContinuousIntegrationBuild=true /v:m /bl:..\artifacts\log\localise.binlog
+    if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
+    Pop-Location
 
 
 # to run your custom scripts instead of automatic tests
 test_script:
 - ps: |
-    & .\cibuild.cmd -test
-    if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode);  }
-    & .\cibuild.cmd -integrationTest
+    & .\cibuild.cmd /p:NoBuild=true -test -logFileName UnitTest.binlog
+    if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
+    & .\cibuild.cmd /p:NoBuild=true -integrationTest -logFileName IntegrationTest.binlog
     if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
 
 
@@ -62,7 +82,7 @@ test_script:
 after_test:
 - ps: |
     Write-Host "Preparing build artifacts..."
-    & .\cibuild.cmd -publish
+    & .\cibuild.cmd -publish -logFileName publish.binlog
     if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
 
 
@@ -73,8 +93,19 @@ artifacts:
 #on_finish:
 #  - ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 
+
 # on build failure
 on_failure:
+- ps: |
+    Get-ChildItem -recurse artifacts\log\*.binlog -ErrorAction SilentlyContinue `
+    | ForEach-Object {
+        Push-AppveyorArtifact "$_"
+    }
+- ps: |
+    Get-ChildItem -recurse English*.xlf -ErrorAction SilentlyContinue `
+    | ForEach-Object {
+        Push-AppveyorArtifact "$_"
+    }
 - ps: |
     Get-ChildItem -recurse artifacts\tests\TestResult.xml -ErrorAction SilentlyContinue `
     | ForEach-Object {

@@ -5,6 +5,8 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using GitCommands;
+using GitUI.HelperDialogs;
+using GitUIPluginInterfaces;
 using GitUIPluginInterfaces.RepositoryHosts;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.Threading;
@@ -46,6 +48,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
         {
             InitializeComponent();
             _selectHostedRepoCB.DisplayMember = nameof(IHostedRemote.DisplayData);
+            _diffViewer.ExtraDiffArgumentsChanged += _fileStatusList_SelectedIndexChanged;
             _loader.LoadingError += (sender, ex) =>
                 {
                     MessageBox.Show(this, ex.Exception.ToString(), Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -341,7 +344,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
 
                         await this.SwitchToMainThreadAsync();
 
-                        SplitAndLoadDiff(content);
+                        SplitAndLoadDiff(content, _currentPullRequestInfo.BaseSha, _currentPullRequestInfo.HeadSha);
                     }
                     catch (Exception ex) when (!(ex is OperationCanceledException))
                     {
@@ -351,12 +354,21 @@ namespace GitUI.CommandsDialogs.RepoHosting
                 .FileAndForget();
         }
 
-        private void SplitAndLoadDiff(string diffData)
+        private void SplitAndLoadDiff(string diffData, string baseSha, string secondSha)
         {
             _diffCache = new Dictionary<string, string>();
 
             var fileParts = Regex.Split(diffData, @"(?:\n|^)diff --git ").Where(el => el != null && el.Trim().Length > 10).ToList();
             var giss = new List<GitItemStatus>();
+
+            // baseSha is the sha of the merge to ("master") sha, the commit to be firstId
+            GitRevision firstRev = ObjectId.TryParse(baseSha, out ObjectId firstId) ? new GitRevision(firstId) : null;
+            GitRevision secondRev = ObjectId.TryParse(secondSha, out ObjectId secondId) ? new GitRevision(secondId) : null;
+            if (secondRev == null)
+            {
+                MessageBox.Show(this, _strUnableUnderstandPatch.Text, Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             foreach (var part in fileParts)
             {
@@ -381,9 +393,8 @@ namespace GitUI.CommandsDialogs.RepoHosting
                 _diffCache.Add(gis.Name, match.Groups[3].Value);
             }
 
-            // Commits in PR may not exist in the repo so GitRevision in FileStatusList is not used,
-            // patches directly from the cache
-            _fileStatusList.SetDiffs(selectedRev: null, parentRev: null, items: giss);
+            // Note: Commits in PR may not exist in the local repo
+            _fileStatusList.SetDiffs(firstRev, secondRev, items: giss);
         }
 
         private void _fetchBtn_Click(object sender, EventArgs e)
@@ -395,9 +406,8 @@ namespace GitUI.CommandsDialogs.RepoHosting
 
             var cmd = string.Format("fetch --no-tags --progress {0} {1}:{2}",
                 _currentPullRequestInfo.HeadRepo.CloneReadOnlyUrl, _currentPullRequestInfo.HeadRef, _currentPullRequestInfo.FetchBranch);
-            var errorOccurred = !FormProcess.ShowDialog(this, AppSettings.GitCommand, cmd);
-
-            if (errorOccurred)
+            var success = FormProcess.ShowDialog(this, process: AppSettings.GitCommand, arguments: cmd, Module.WorkingDir, input: null, useDialogSettings: true);
+            if (!success)
             {
                 return;
             }
@@ -428,8 +438,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
                     hostedRepository.CloneProtocol = _cloneGitProtocol;
                     if (hostedRepository.CloneReadOnlyUrl != remoteUrl)
                     {
-                        MessageBox.Show(this, string.Format(_strRemoteAlreadyExist.Text,
-                                            remoteName, hostedRepository.CloneReadOnlyUrl, remoteUrl),
+                        MessageBox.Show(this, string.Format(_strRemoteAlreadyExist.Text, remoteName, hostedRepository.CloneReadOnlyUrl, remoteUrl),
                             Strings.Error, MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
@@ -447,9 +456,8 @@ namespace GitUI.CommandsDialogs.RepoHosting
                 }
 
                 var cmd = string.Format("fetch --no-tags --progress {0} {1}:{0}/{1}", remoteName, remoteRef);
-                var errorOccurred = !FormProcess.ShowDialog(this, AppSettings.GitCommand, cmd);
-
-                if (errorOccurred)
+                var success = FormProcess.ShowDialog(this, process: AppSettings.GitCommand, arguments: cmd, Module.WorkingDir, input: null, useDialogSettings: true);
+                if (!success)
                 {
                     return;
                 }
@@ -457,7 +465,8 @@ namespace GitUI.CommandsDialogs.RepoHosting
                 UICommands.RepoChangedNotifier.Notify();
 
                 cmd = string.Format("checkout {0}/{1}", remoteName, remoteRef);
-                if (FormProcess.ShowDialog(this, AppSettings.GitCommand, cmd))
+                success = FormProcess.ShowDialog(this, process: AppSettings.GitCommand, arguments: cmd, Module.WorkingDir, input: null, useDialogSettings: true);
+                if (success)
                 {
                     UICommands.RepoChangedNotifier.Notify();
                 }
@@ -472,7 +481,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
 
         private void _fileStatusList_SelectedIndexChanged(object sender, EventArgs e)
         {
-            var gis = _fileStatusList.SelectedItem;
+            var gis = _fileStatusList.SelectedItem?.Item;
             if (gis == null)
             {
                 return;
@@ -486,7 +495,7 @@ namespace GitUI.CommandsDialogs.RepoHosting
             }
             else
             {
-                _diffViewer.ViewPatch(gis.Name, text: data);
+                _diffViewer.ViewFixedPatch(gis.Name, text: data);
             }
         }
 

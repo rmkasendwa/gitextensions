@@ -27,7 +27,7 @@ namespace GitUI.UserControls
 
         private void InitializeComponent()
         {
-            Controls.Add(_panel = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.Fixed3D });
+            Controls.Add(_panel = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None });
         }
 
         public override int ExitCode => _nLastExitCode;
@@ -83,47 +83,50 @@ namespace GitUI.UserControls
 
         public override void StartProcess(string command, string arguments, string workDir, Dictionary<string, string> envVariables)
         {
-            var commandLine = new ArgumentBuilder { command.Quote(), arguments }.ToString();
-            var outputProcessor = new ConsoleCommandLineOutputProcessor(commandLine.Length, FireDataReceived);
+            ProcessOperation operation = CommandLog.LogProcessStart(command, arguments, workDir);
 
-            var startInfo = new ConEmuStartInfo
+            try
             {
-                ConsoleProcessCommandLine = commandLine,
-                IsEchoingConsoleCommandLine = true,
-                WhenConsoleProcessExits = WhenConsoleProcessExits.KeepConsoleEmulatorAndShowMessage,
-                AnsiStreamChunkReceivedEventSink = outputProcessor.AnsiStreamChunkReceived,
-                StartupDirectory = workDir
-            };
+                var commandLine = new ArgumentBuilder { command.Quote(), arguments }.ToString();
+                var outputProcessor = new ConsoleCommandLineOutputProcessor(commandLine.Length, FireDataReceived);
 
-            if (AppSettings.ConEmuStyle.ValueOrDefault != "Default")
-            {
-                startInfo.ConsoleProcessExtraArgs = " -new_console:P:\"" + AppSettings.ConEmuStyle.ValueOrDefault + "\"";
-            }
-
-            foreach (var (name, value) in envVariables)
-            {
-                startInfo.SetEnv(name, value);
-            }
-
-            var operation = CommandLog.LogProcessStart(command, arguments, workDir);
-
-            startInfo.ConsoleProcessExitedEventSink = (_, args) =>
-            {
-                _nLastExitCode = args.ExitCode;
-                operation.LogProcessEnd(_nLastExitCode);
-                outputProcessor.Flush();
-                FireProcessExited();
-            };
-
-            startInfo.ConsoleEmulatorClosedEventSink = (sender, _) =>
-            {
-                if (sender == _terminal.RunningSession)
+                var startInfo = new ConEmuStartInfo
                 {
-                    FireTerminated();
-                }
-            };
+                    ConsoleProcessCommandLine = commandLine,
+                    IsEchoingConsoleCommandLine = true,
+                    WhenConsoleProcessExits = WhenConsoleProcessExits.KeepConsoleEmulatorAndShowMessage,
+                    AnsiStreamChunkReceivedEventSink = outputProcessor.AnsiStreamChunkReceived,
+                    StartupDirectory = workDir
+                };
 
-            _terminal.Start(startInfo, ThreadHelper.JoinableTaskFactory);
+                foreach (var (name, value) in envVariables)
+                {
+                    startInfo.SetEnv(name, value);
+                }
+
+                startInfo.ConsoleProcessExitedEventSink = (_, args) =>
+                {
+                    _nLastExitCode = args.ExitCode;
+                    operation.LogProcessEnd(_nLastExitCode);
+                    outputProcessor.Flush();
+                    FireProcessExited();
+                };
+
+                startInfo.ConsoleEmulatorClosedEventSink = (sender, _) =>
+                {
+                    if (sender == _terminal.RunningSession)
+                    {
+                        FireTerminated();
+                    }
+                };
+
+                _terminal.Start(startInfo, ThreadHelper.JoinableTaskFactory, AppSettings.ConEmuStyle.Value, AppSettings.ConEmuFontSize.Value);
+            }
+            catch (Exception ex)
+            {
+                operation.LogProcessEnd(ex);
+                throw;
+            }
         }
     }
 

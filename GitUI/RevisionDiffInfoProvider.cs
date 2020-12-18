@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-using GitCommands;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 
 namespace GitUI
@@ -15,21 +15,17 @@ namespace GitUI
         /// A - first selected row
         /// B - second selected row
         /// </summary>
-        [ContractAnnotation("revisions:null=>false,extraDiffArgs:null,firstRevision:null,secondRevision:null,error:notnull")]
-        [ContractAnnotation("=>false,extraDiffArgs:null,firstRevision:null,secondRevision:null,error:notnull")]
-        [ContractAnnotation("=>true,extraDiffArgs:notnull,firstRevision:notnull,secondRevision:notnull,error:null")]
+        [ContractAnnotation("revisions:null=>false,firstRevision:null,secondRevision:null,error:notnull")]
+        [ContractAnnotation("=>false,firstRevision:null,secondRevision:null,error:notnull")]
+        [ContractAnnotation("=>true,firstRevision:notnull,secondRevision:notnull,error:null")]
         public static bool TryGet(
             IReadOnlyList<GitRevision> revisions,
             RevisionDiffKind diffKind,
-            out string extraDiffArgs,
             out string firstRevision,
             out string secondRevision,
             out string error)
         {
             // NOTE Order in revisions is that first clicked is last in array
-
-            // Detect rename and copy
-            extraDiffArgs = "-M -C";
 
             if (revisions == null)
             {
@@ -47,7 +43,7 @@ namespace GitUI
                 return false;
             }
 
-            if (revisions[0] == null || (revisions.Count == 2 && revisions[1] == null))
+            if (revisions[0] == null)
             {
                 error = "Unexpected single null argument to difftool";
                 firstRevision = null;
@@ -55,11 +51,20 @@ namespace GitUI
                 return false;
             }
 
+            if (revisions.Count == 2 && revisions[1] == null && diffKind == RevisionDiffKind.DiffBLocal)
+            {
+                error = "Unexpected second null argument to difftool for DiffB";
+                firstRevision = null;
+                secondRevision = null;
+                return false;
+            }
+
             if (diffKind == RevisionDiffKind.DiffAB)
             {
+                // If revisions[1]?.Guid is null, the "commit before the initial" is used as firstRev
                 firstRevision = revisions.Count == 1
                     ? GetParentRef(revisions[0])
-                    : revisions[1].Guid;
+                    : revisions[1]?.Guid ?? "--root";
                 secondRevision = revisions[0].Guid;
             }
             else
@@ -71,19 +76,11 @@ namespace GitUI
                 {
                     firstRevision = revisions[0].Guid;
                 }
-                else if (diffKind == RevisionDiffKind.DiffBParentLocal)
-                {
-                    firstRevision = GetParentRef(revisions[0]);
-                }
                 else if (revisions.Count == 1)
                 {
                     if (diffKind == RevisionDiffKind.DiffALocal)
                     {
                         firstRevision = GetParentRef(revisions[0]);
-                    }
-                    else if (diffKind == RevisionDiffKind.DiffAParentLocal)
-                    {
-                        firstRevision = GetParentRef(revisions[0]) + "^";
                     }
                     else
                     {
@@ -94,11 +91,7 @@ namespace GitUI
                 }
                 else if (diffKind == RevisionDiffKind.DiffALocal)
                 {
-                    firstRevision = revisions[1].Guid;
-                }
-                else if (diffKind == RevisionDiffKind.DiffAParentLocal)
-                {
-                    firstRevision = GetParentRef(revisions[1]);
+                    firstRevision = revisions[1]?.Guid ?? "--root";
                 }
                 else
                 {
@@ -111,9 +104,9 @@ namespace GitUI
             error = null;
             return true;
 
-            string GetParentRef(GitRevision revision)
+            static string GetParentRef(GitRevision revision)
             {
-                return revision.FirstParentGuid?.ToString() ?? revision.Guid + '^';
+                return revision.FirstParentId?.ToString() ?? revision.Guid + '^';
             }
         }
     }

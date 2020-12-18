@@ -7,6 +7,7 @@ using System.Windows.Forms;
 using GitCommands;
 using GitUI.BranchTreePanel.Interfaces;
 using GitUI.UserControls;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 
 namespace GitUI.BranchTreePanel
@@ -24,6 +25,10 @@ namespace GitUI.BranchTreePanel
                 Tree = tree;
             }
 
+            /// <summary>
+            /// Adds a new node to the collection.
+            /// </summary>
+            /// <param name="node">The node to add.</param>
             public void AddNode(Node node)
             {
                 _nodesList.Add(node);
@@ -40,6 +45,8 @@ namespace GitUI.BranchTreePanel
             }
 
             public IEnumerator<Node> GetEnumerator() => _nodesList.GetEnumerator();
+
+            public void InsertNode(int index, Node node) => _nodesList.Insert(index, node);
 
             System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
@@ -106,6 +113,8 @@ namespace GitUI.BranchTreePanel
             }
 
             public int Count => _nodesList.Count;
+
+            public Node LastNode => _nodesList.Count > 0 ? _nodesList[_nodesList.Count - 1] : null;
         }
 
         private abstract class Tree : IDisposable
@@ -115,11 +124,12 @@ namespace GitUI.BranchTreePanel
             private readonly CancellationTokenSequence _reloadCancellationTokenSequence = new CancellationTokenSequence();
             private bool _firstReloadNodesSinceModuleChanged = true;
 
-            public void Dispose()
-            {
-                Detached();
-                _reloadCancellationTokenSequence.Dispose();
-            }
+            // A flag to indicate whether the data is currently being filtered or not.
+            // This helps to reduce unnecessary treeview rebinds.
+            private bool _isCurrentlyFiltering;
+
+            // A flag to indicate whether the data is being filtered (e.g. Show Current Branch Only).
+            private protected static AsyncLocal<bool> IsFiltering = new AsyncLocal<bool>();
 
             protected Tree(TreeNode treeNode, IGitUICommandsSource uiCommands)
             {
@@ -150,7 +160,13 @@ namespace GitUI.BranchTreePanel
                 uiCommands.UICommands.PostRepositoryChanged += UICommands_PostRepositoryChanged;
             }
 
-            private void UICommands_PostRepositoryChanged(object sender, GitUIPluginInterfaces.GitUIEventArgs e)
+            public void Dispose()
+            {
+                Detached();
+                _reloadCancellationTokenSequence.Dispose();
+            }
+
+            private void UICommands_PostRepositoryChanged(object sender, GitUIEventArgs e)
             {
                 if (!IsAttached)
                 {
@@ -177,8 +193,8 @@ namespace GitUI.BranchTreePanel
             /// </summary>
             public bool IgnoreSelectionChangedEvent { get; set; }
             protected GitModule Module => UICommands.Module;
-
             protected bool IsAttached { get; private set; }
+            protected virtual bool SupportsFiltering { get; } = false;
 
             public Task AttachedAsync()
             {
@@ -202,6 +218,57 @@ namespace GitUI.BranchTreePanel
             {
             }
 
+            /// <summary>
+            /// Requests to refresh the data tree and to apply filtering, if necessary.
+            /// </summary>
+            protected internal virtual void Refresh()
+            {
+                // NOTE: descendants may need to break their local caches to ensure the latest data is loaded.
+
+                ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    IsFiltering.Value = _isCurrentlyFiltering;
+                    await ReloadNodesAsync(LoadNodesAsync);
+                });
+            }
+
+            /// <summary>
+            /// Requests to refresh the data tree and to apply filtering, if necessary.
+            /// </summary>
+            /// <param name="isFiltering">
+            ///  <see langword="true"/>, if the data is being filtered; otherwise <see langword="false"/>.
+            /// </param>
+            internal void ToggleFilterMode(bool isFiltering)
+            {
+                // If we're not currently filtering and no need to filter now -> exit.
+                // Else we need to iterate over the list and rebind the tree - whilst there
+                // could be a situation whether a user just refreshed the grid, there could
+                // also be a situation where the user applied a different filter, or checked
+                // out a different ref (e.g. a branch or commit), and we have a different
+                // set of branches to show/hide.
+
+                if (!SupportsFiltering || (!isFiltering && !_isCurrentlyFiltering))
+                {
+                    return;
+                }
+
+                _isCurrentlyFiltering = isFiltering;
+
+                ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    IsFiltering.Value = true;
+                    await ReloadNodesAsync(LoadNodesAsync);
+                });
+            }
+
+            protected virtual Task<Nodes> LoadNodesAsync(CancellationToken token)
+            {
+                return Task.FromResult<Nodes>(null);
+            }
+
+            public IEnumerable<TNode> DepthEnumerator<TNode>() where TNode : Node
+                => Nodes.DepthEnumerator<TNode>();
+
             // Invoke from child class to reload nodes for the current Tree. Clears Nodes, invokes
             // input async function that should populate Nodes, then fills the tree view with its contents,
             // making sure to disable/enable the control.
@@ -215,7 +282,7 @@ namespace GitUI.BranchTreePanel
                     return;
                 }
 
-                var newNodes = await loadNodesTask(token);
+                Nodes newNodes = await loadNodesTask(token);
 
                 await treeView.SwitchToMainThreadAsync(token);
 
@@ -224,9 +291,11 @@ namespace GitUI.BranchTreePanel
 
                 try
                 {
+                    string originalSelectedNodeFullNamePath = treeView.SelectedNode?.GetFullNamePath();
+
                     treeView.BeginUpdate();
                     IgnoreSelectionChangedEvent = true;
-                    FillTreeViewNode(_firstReloadNodesSinceModuleChanged);
+                    FillTreeViewNode(originalSelectedNodeFullNamePath, _firstReloadNodesSinceModuleChanged);
                 }
                 finally
                 {
@@ -237,13 +306,32 @@ namespace GitUI.BranchTreePanel
                 }
             }
 
-            private void FillTreeViewNode(bool firstTime)
+            private void FillTreeViewNode(string originalSelectedNodeFullNamePath, bool firstTime)
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
 
                 var expandedNodesState = firstTime ? new HashSet<string>() : TreeViewNode.GetExpandedNodesState();
                 Nodes.FillTreeViewNode(TreeViewNode);
+
+                var selectedNode = TreeViewNode.TreeView.SelectedNode;
+                if (originalSelectedNodeFullNamePath != selectedNode?.GetFullNamePath())
+                {
+                    var node = TreeViewNode.GetNodeFromPath(originalSelectedNodeFullNamePath);
+                    if (node != null)
+                    {
+                        if (((BaseBranchNode)node.Tag).Visible)
+                        {
+                            TreeViewNode.TreeView.SelectedNode = node;
+                        }
+                        else
+                        {
+                            TreeViewNode.TreeView.SelectedNode = null;
+                        }
+                    }
+                }
+
                 PostFillTreeViewNode(firstTime);
+
                 TreeViewNode.RestoreExpandedNodesState(expandedNodesState);
             }
 
@@ -258,31 +346,24 @@ namespace GitUI.BranchTreePanel
             {
                 if (TreeViewNode.TreeView.SelectedNode != null)
                 {
-                    SetSelectedNode(TreeViewNode.TreeView.SelectedNode);
-                    EnsureNodeVisible(TreeViewNode.TreeView.SelectedNode);
+                    EnsureNodeVisible(TreeViewNode.TreeView.Handle, TreeViewNode.TreeView.SelectedNode);
                 }
-
-                if (TreeViewNode.TreeView.Nodes.Count > 0)
+                else if (TreeViewNode.TreeView.Nodes.Count > 0)
                 {
                     // No selected node, just make sure the first node is visible
-                    EnsureNodeVisible(TreeViewNode.TreeView.Nodes[0]);
+                    EnsureNodeVisible(TreeViewNode.TreeView.Handle, TreeViewNode.TreeView.Nodes[0]);
                 }
 
                 return;
 
-                void SetSelectedNode(TreeNode node)
-                {
-                    TreeViewNode.TreeView.SelectedNode = node;
-                }
-
-                void EnsureNodeVisible(TreeNode node)
+                static void EnsureNodeVisible(IntPtr hwnd, TreeNode node)
                 {
                     node.EnsureVisible();
 
                     // EnsureVisible leads to horizontal scrolling in some cases. We make sure to force horizontal
                     // scroll back to 0. Note that we use SendMessage rather than SetScrollPos as the former works
                     // outside of Begin/EndUpdate.
-                    NativeMethods.SendMessageW(TreeViewNode.TreeView.Handle, NativeMethods.WM_HSCROLL, (IntPtr)NativeMethods.SBH.LEFT, IntPtr.Zero);
+                    NativeMethods.SendMessageW(hwnd, NativeMethods.WM_HSCROLL, (IntPtr)NativeMethods.SBH.LEFT, IntPtr.Zero);
                 }
             }
         }
@@ -390,6 +471,7 @@ namespace GitUI.BranchTreePanel
             protected virtual void ApplyStyle()
             {
                 SetNodeFont(FontStyle.Regular);
+                TreeViewNode.ToolTipText = string.Empty;
             }
 
             internal virtual void OnSelected()
@@ -410,7 +492,7 @@ namespace GitUI.BranchTreePanel
             }
 
             [CanBeNull]
-            private static T GetNodeSafe<T>([CanBeNull] TreeNode treeNode) where T : class, INode
+            internal static T GetNodeSafe<T>([CanBeNull] TreeNode treeNode) where T : class, INode
             {
                 return treeNode?.Tag as T;
             }

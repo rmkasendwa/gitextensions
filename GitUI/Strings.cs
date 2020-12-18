@@ -10,11 +10,19 @@ namespace GitUI
         private readonly TranslationString _warning = new TranslationString("Warning");
         private readonly TranslationString _yes = new TranslationString("Yes");
         private readonly TranslationString _no = new TranslationString("No");
+        private readonly TranslationString _okText = new TranslationString("OK");
+        private readonly TranslationString _cancelText = new TranslationString("Cancel");
 
+        private readonly TranslationString _buttonCheckoutBranch = new TranslationString("Checkout branch");
+        private readonly TranslationString _buttonContinue = new TranslationString("Continue");
+        private readonly TranslationString _buttonCreateBranch = new TranslationString("Create branch");
+
+        private readonly TranslationString _containedInCurrentCommitText = new TranslationString("'{0}' is contained in the currently selected commit");
         private readonly TranslationString _containedInBranchesText = new TranslationString("Contained in branches:");
         private readonly TranslationString _containedInNoBranchText = new TranslationString("Contained in no branch");
         private readonly TranslationString _containedInTagsText = new TranslationString("Contained in tags:");
         private readonly TranslationString _containedInNoTagText = new TranslationString("Contained in no tag");
+        private readonly TranslationString _invisibleCommitText = new TranslationString("'{0}' is not currently visible");
         private readonly TranslationString _viewPullRequest = new TranslationString("View pull requests");
         private readonly TranslationString _createPullRequest = new TranslationString("Create pull request");
         private readonly TranslationString _forkCloneRepo = new TranslationString("Fork or clone a repository");
@@ -34,6 +42,7 @@ namespace GitUI
         private readonly TranslationString _remote = new TranslationString("Remote");
         private readonly TranslationString _openWithGitExtensions = new TranslationString("Open with Git Extensions");
         private readonly TranslationString _contScrollToNextFileOnlyWithAlt = new TranslationString("Enable automatic continuous scroll (without ALT button)");
+        private readonly TranslationString _noRevision = new TranslationString("No revision");
 
         private readonly TranslationString _authored = new TranslationString("authored");
         private readonly TranslationString _committed = new TranslationString("committed");
@@ -43,12 +52,39 @@ namespace GitUI
 
         private readonly TranslationString _errorCaptionFailedDeleteFile = new TranslationString("Failed to delete file");
         private readonly TranslationString _errorCaptionFailedDeleteFolder = new TranslationString("Failed to delete directory");
+        private readonly TranslationString _errorCaptionNotOnBranch = new TranslationString("Not on a branch");
+
+        private readonly TranslationString _mainInstructionNotOnBranch = new TranslationString("You are not working on a branch");
 
         private readonly TranslationString _noBranch = new TranslationString("no branch");
         private readonly TranslationString _removeSelectedInvalidRepository = new TranslationString("Remove the selected invalid repository");
         private readonly TranslationString _removeAllInvalidRepositories = new TranslationString("Remove all {0} invalid repositories");
         private readonly TranslationString _open = new TranslationString("Open");
         private readonly TranslationString _directoryIsNotAValidRepository = new TranslationString("The selected item is not a valid git repository.");
+
+        private readonly TranslationString _sortBy = new TranslationString("&Sort by...");
+        private readonly TranslationString _sortOrder = new TranslationString("&Sort order...");
+
+        private readonly TranslationString _diffSelectedWithRememberedFile = new TranslationString("Diff with \"{0}\"");
+        private readonly TranslationString _diffWithParent = new TranslationString("Diff with a/");
+        private readonly TranslationString _diffBaseToB = new TranslationString("Unique diff BASE with b/");
+        private readonly TranslationString _diffCommonBase = new TranslationString("Common diff with BASE a/");
+        private readonly TranslationString _diffRange = new TranslationString("Range diff");
+        private readonly TranslationString _combinedDiff = new TranslationString("Combined diff");
+
+        private readonly TranslationString _showDiffForAllParentsText = new TranslationString("Show file differences for all parents in browse dialog");
+        private readonly TranslationString _showDiffForAllParentsTooltip = new TranslationString(@"Show all differences between the selected commits, not limiting to only one difference.
+
+- For a single selected commit, show the difference with its parent commit.
+- For a single selected merge commit, show the difference with all parents.
+- For two selected commits with a common ancestor (BASE):
+   - Show the difference between the commits.
+   - The difference of unique files from BASE to each of the selected commits.
+   - The difference of common files (identical changes) from BASE to the commits.
+- For multiple selected commits (up to four), show the difference for all the first selected with the last selected commit.
+- For more than four selected commits, show the difference from the first to the last selected commit.");
+
+        private readonly TranslationString _rotInactive = new TranslationString("[ Inactive ]");
 
         // public only because of FormTranslate
         public Strings()
@@ -70,11 +106,19 @@ namespace GitUI
         public static string Warning => _instance.Value._warning.Text;
         public static string Yes => _instance.Value._yes.Text;
         public static string No => _instance.Value._no.Text;
+        public static string OK => _instance.Value._okText.Text;
+        public static string Cancel => _instance.Value._cancelText.Text;
 
+        public static string ButtonContinue => _instance.Value._buttonContinue.Text;
+        public static string ButtonCheckoutBranch => _instance.Value._buttonCheckoutBranch.Text;
+        public static string ButtonCreateBranch => _instance.Value._buttonCreateBranch.Text;
+
+        public static string ContainedInCurrentCommit => _instance.Value._containedInCurrentCommitText.Text;
         public static string ContainedInBranches => _instance.Value._containedInBranchesText.Text;
         public static string ContainedInNoBranch => _instance.Value._containedInNoBranchText.Text;
         public static string ContainedInTags => _instance.Value._containedInTagsText.Text;
         public static string ContainedInNoTag => _instance.Value._containedInNoTagText.Text;
+        public static string InvisibleCommit => _instance.Value._invisibleCommitText.Text;
 
         public static string CreatePullRequest => _instance.Value._createPullRequest.Text;
         public static string ForkCloneRepo => _instance.Value._forkCloneRepo.Text;
@@ -97,6 +141,7 @@ namespace GitUI
         public static string Remote => _instance.Value._remote.Text;
         public static string OpenWithGitExtensions => _instance.Value._openWithGitExtensions.Text;
         public static string ContScrollToNextFileOnlyWithAlt => _instance.Value._contScrollToNextFileOnlyWithAlt.Text;
+        public static string NoRevision => _instance.Value._noRevision.Text;
 
         public static string OpenReport => _instance.Value._openReport.Text;
 
@@ -109,11 +154,28 @@ namespace GitUI
 
         public static string ErrorCaptionFailedDeleteFile => _instance.Value._errorCaptionFailedDeleteFile.Text;
         public static string ErrorCaptionFailedDeleteFolder => _instance.Value._errorCaptionFailedDeleteFolder.Text;
+        public static string ErrorCaptionNotOnBranch => _instance.Value._errorCaptionNotOnBranch.Text;
+
+        public static string ErrorInstructionNotOnBranch => _instance.Value._mainInstructionNotOnBranch.Text;
 
         public static string NoBranch => _instance.Value._noBranch.Text;
         public static string RemoveSelectedInvalidRepository => _instance.Value._removeSelectedInvalidRepository.Text;
         public static string RemoveAllInvalidRepositories => _instance.Value._removeAllInvalidRepositories.Text;
         public static string Open => _instance.Value._open.Text;
         public static string DirectoryInvalidRepository => _instance.Value._directoryIsNotAValidRepository.Text;
+
+        public static string SortBy => _instance.Value._sortBy.Text;
+        public static string SortOrder => _instance.Value._sortOrder.Text;
+
+        public static string DiffSelectedWithRememberedFile => _instance.Value._diffSelectedWithRememberedFile.Text;
+        public static string DiffWithParent => _instance.Value._diffWithParent.Text;
+        public static string DiffBaseToB => _instance.Value._diffBaseToB.Text;
+        public static string DiffCommonBase => _instance.Value._diffCommonBase.Text;
+        public static string DiffRange => _instance.Value._diffRange.Text;
+        public static string CombinedDiff => _instance.Value._combinedDiff.Text;
+        public static string ShowDiffForAllParentsText => _instance.Value._showDiffForAllParentsText.Text;
+        public static string ShowDiffForAllParentsTooltip => _instance.Value._showDiffForAllParentsTooltip.Text;
+
+        public static string Inactive => _instance.Value._rotInactive.Text;
     }
 }

@@ -1,12 +1,14 @@
 [CmdletBinding(PositionalBinding=$false)]
 Param(
   [string] $version,
+  [string] $logFileName = "build.binlog",
   [string][Alias('c')] $configuration = "Debug",
   [string][Alias('v')] $verbosity = "minimal",
   [switch] $restore,
   [switch][Alias('b')]$build,
   [switch] $rebuild,
-  [switch] $buildNative,
+  [switch][Alias('bn')] $buildNative,
+  [switch][Alias('l')] $launch,
   [switch] $clean,
   [switch] $publish,
   [switch] $loc,
@@ -69,7 +71,7 @@ function Build {
   }
 
   # build the solution
-  $bl = if ($binaryLog) { "/bl:" + (Join-Path $LogDir "build.binlog") } else { "" }
+  $bl = if ($binaryLog) { "/bl:" + (Join-Path $LogDir $logFileName) } else { "" }
   $platformArg = if ($platform) { "/p:Platform=$platform" } else { "" }
 
   MSBuild $toolsetBuildProj `
@@ -88,7 +90,17 @@ function Build {
     @properties;
 
   $exitCode = $LastExitCode;
-  Exit $exitCode;
+  if ($exitCode -ne 0) {
+    Exit $exitCode
+  }
+
+  # launch the app once it is built
+  if ($launch) {
+    $gitExtensionsExe = "$ArtifactsDir\bin\GitExtensions\$configuration\net461\GitExtensions.exe";
+    if (Test-Path $gitExtensionsExe) {
+      & $gitExtensionsExe
+    }
+  }
 }
 
 try {

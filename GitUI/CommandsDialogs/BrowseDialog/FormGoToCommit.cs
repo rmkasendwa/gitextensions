@@ -78,7 +78,7 @@ namespace GitUI.CommandsDialogs.BrowseDialog
         {
             comboBoxTags.Text = Strings.LoadingData;
             return _tagsLoader.LoadAsync(
-                () => Module.GetTagRefs(GitModule.GetTagRefsSortOrder.ByCommitDateDescending).ToList(),
+                () => Module.GetRefs(tags: true, branches: false).ToList(),
                 list =>
                 {
                     comboBoxTags.Text = string.Empty;
@@ -92,7 +92,7 @@ namespace GitUI.CommandsDialogs.BrowseDialog
         {
             comboBoxBranches.Text = Strings.LoadingData;
             return _branchesLoader.LoadAsync(
-                () => Module.GetRefs(false).ToList(),
+                () => Module.GetRefs(tags: false, branches: true).ToList(),
                 list =>
                 {
                     comboBoxBranches.Text = string.Empty;
@@ -130,6 +130,10 @@ namespace GitUI.CommandsDialogs.BrowseDialog
             else if (comboBoxBranches.Focused)
             {
                 _selectedRevision = _selectedBranch != null ? _selectedBranch.Guid : "";
+            }
+            else
+            {
+                textboxCommitExpression.Focus();
             }
         }
 

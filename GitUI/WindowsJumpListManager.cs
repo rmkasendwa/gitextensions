@@ -23,6 +23,7 @@ namespace GitUI
         private ThumbnailToolBarButton _commitButton;
         private ThumbnailToolBarButton _pushButton;
         private ThumbnailToolBarButton _pullButton;
+        private string _deferredAddToRecent;
         private bool ToolbarButtonsCreated => _commitButton != null;
         private readonly IRepositoryDescriptionProvider _repositoryDescriptionProvider;
 
@@ -65,8 +66,14 @@ namespace GitUI
         [ContractAnnotation("workingDir:null=>halt")]
         public void AddToRecent([NotNull] string workingDir)
         {
-            if (!ToolbarButtonsCreated || !IsSupported)
+            if (!IsSupported)
             {
+                return;
+            }
+
+            if (!ToolbarButtonsCreated)
+            {
+                _deferredAddToRecent = workingDir;
                 return;
             }
 
@@ -75,7 +82,7 @@ namespace GitUI
                 throw new ArgumentException(nameof(workingDir));
             }
 
-            try
+            SafeInvoke(() =>
             {
                 string repositoryDescription = _repositoryDescriptionProvider.Get(workingDir);
                 if (string.IsNullOrWhiteSpace(repositoryDescription))
@@ -108,31 +115,24 @@ namespace GitUI
                 _commitButton.Enabled = true;
                 _pushButton.Enabled = true;
                 _pullButton.Enabled = true;
-            }
-            catch (Exception ex)
-                when (
-
-                    // reported in https://github.com/gitextensions/gitextensions/issues/2269
-                    ex is COMException ||
-
-                    // reported in https://github.com/gitextensions/gitextensions/issues/6767
-                    ex is UnauthorizedAccessException ||
-
-                    // reported in https://github.com/gitextensions/gitextensions/issues/4549
-                    // looks like a regression in Windows 10.0.16299 (1709)
-                    ex is IOException)
-            {
-                Trace.WriteLine(ex.Message, "UpdateJumplist");
-            }
+            }, nameof(AddToRecent));
         }
 
         public void UpdateCommitIcon(Image image)
         {
-            if (ToolbarButtonsCreated && IsSupportedAndVisible)
+            SafeInvoke(() =>
             {
-                _commitButton.Icon = MakeIcon(image, 48, true);
-            }
+                if (ToolbarButtonsCreated && IsSupportedAndVisible)
+                {
+                    _commitButton.Icon = MakeIcon(image, 48, true);
+                }
+            }, nameof(UpdateCommitIcon));
         }
+
+        /// <summary>
+        /// Indicates if the JumpList creation is still needed
+        /// </summary>
+        public bool NeedsJumpListCreation => IsSupported && !ToolbarButtonsCreated;
 
         /// <summary>
         /// Creates a JumpList for the given application instance.
@@ -147,28 +147,25 @@ namespace GitUI
                 return;
             }
 
-            CreateJumpList();
+            SafeInvoke(() =>
+            {
+                // One ApplicationId, so all windows must share the same jumplist
+                var jumpList = JumpList.CreateJumpList();
+                jumpList.ClearAllUserTasks();
+                jumpList.KnownCategoryToDisplay = JumpListKnownCategoryType.Recent;
+                jumpList.Refresh();
 
-            CreateTaskbarButtons(windowHandle, buttons);
+                CreateTaskbarButtons(windowHandle, buttons);
+            }, nameof(CreateJumpList));
+
+            if (ToolbarButtonsCreated && _deferredAddToRecent != null)
+            {
+                var recentRepoAddToRecent = _deferredAddToRecent;
+                _deferredAddToRecent = null;
+                AddToRecent(recentRepoAddToRecent);
+            }
 
             return;
-
-            void CreateJumpList()
-            {
-                try
-                {
-                    // One ApplicationId, so all windows must share the same jumplist
-                    var jumpList = JumpList.CreateJumpList();
-                    jumpList.ClearAllUserTasks();
-                    jumpList.KnownCategoryToDisplay = JumpListKnownCategoryType.Recent;
-                    jumpList.Refresh();
-                }
-                catch (Exception ex)
-                {
-                    // have seen a COM exception here that caused the UI to stop loading
-                    Trace.WriteLine(ex.Message, "CreateJumpList");
-                }
-            }
 
             void CreateTaskbarButtons(IntPtr handle, WindowsThumbnailToolbarButtons thumbButtons)
             {
@@ -196,9 +193,12 @@ namespace GitUI
                 return;
             }
 
-            _commitButton.Enabled = false;
-            _pushButton.Enabled = false;
-            _pullButton.Enabled = false;
+            SafeInvoke(() =>
+            {
+                _commitButton.Enabled = false;
+                _pushButton.Enabled = false;
+                _pullButton.Enabled = false;
+            }, nameof(DisableThumbnailToolbar));
         }
 
         /// <summary>
@@ -256,6 +256,36 @@ namespace GitUI
             // following line would work directly on any image, but then
             // it wouldn't look as nice.
             return Icon.FromHandle(square.GetHicon());
+        }
+
+        private static void SafeInvoke(Action action, string callerName)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+                when (
+
+                    // reported in https://github.com/gitextensions/gitextensions/issues/6760
+                    // reported in https://github.com/gitextensions/gitextensions/issues/8234
+                    ex is Microsoft.WindowsAPICodePack.Shell.ShellException ||
+
+                    // reported in https://github.com/gitextensions/gitextensions/issues/2269
+                    ex is COMException ||
+
+                    // reported in https://github.com/gitextensions/gitextensions/issues/6767
+                    ex is UnauthorizedAccessException ||
+
+                    // reported in https://github.com/gitextensions/gitextensions/issues/4549
+                    // looks like a regression in Windows 10.0.16299 (1709)
+                    ex is IOException ||
+
+                    // observed during integration tests: A valid active Window is needed to update the Taskbar.
+                    ex is InvalidOperationException)
+            {
+                Trace.WriteLine(ex.Message, callerName);
+            }
         }
     }
 }

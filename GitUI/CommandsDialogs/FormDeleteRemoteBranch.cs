@@ -5,7 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 using GitCommands;
-using GitCommands.Git;
+using GitCommands.Git.Commands;
+using GitUI.HelperDialogs;
 using GitUI.Script;
 using GitUIPluginInterfaces;
 using ResourceManager;
@@ -78,7 +79,7 @@ namespace GitUI.CommandsDialogs
 
                     ScriptManager.RunEventScripts(this, ScriptEvent.BeforePush);
 
-                    using (var form = new FormRemoteProcess(Module, cmd.Arguments)
+                    using (var form = new FormRemoteProcess(UICommands, process: null, cmd.Arguments)
                     {
                         Remote = remote
                     })
@@ -109,7 +110,7 @@ namespace GitUI.CommandsDialogs
 
         private void EnsurePageant(string remote)
         {
-            if (GitCommandHelpers.Plink())
+            if (GitSshHelpers.Plink())
             {
                 if (!File.Exists(AppSettings.Pageant))
                 {

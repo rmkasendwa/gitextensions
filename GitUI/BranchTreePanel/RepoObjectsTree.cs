@@ -12,7 +12,10 @@ using GitExtUtils.GitUI;
 using GitExtUtils.GitUI.Theming;
 using GitUI.CommandsDialogs;
 using GitUI.Properties;
+using GitUI.Script;
 using GitUI.UserControls;
+using GitUI.UserControls.RevisionGrid;
+using GitUIPluginInterfaces;
 using JetBrains.Annotations;
 using ResourceManager;
 
@@ -20,6 +23,7 @@ namespace GitUI.BranchTreePanel
 {
     public partial class RepoObjectsTree : GitModuleControl
     {
+        private readonly CancellationTokenSequence _selectionCancellationTokenSequence = new CancellationTokenSequence();
         private readonly TranslationString _showBranchOnly =
             new TranslationString("Filter the revision grid to show this branch only\nTo show all branches, right click the revision grid, select 'view' and then the 'show all branches'");
         private readonly TranslationString _searchTooltip = new TranslationString("Search");
@@ -37,9 +41,14 @@ namespace GitUI.BranchTreePanel
         private FilterBranchHelper _filterBranchHelper;
         private IAheadBehindDataProvider _aheadBehindDataProvider;
         private bool _searchCriteriaChanged;
+        private ICheckRefs _refsSource;
+        private IScriptHostControl _scriptHost;
+        private IRunScript _scriptRunner;
 
         public RepoObjectsTree()
         {
+            Disposed += (s, e) => _selectionCancellationTokenSequence.Dispose();
+
             InitializeComponent();
             InitImageList();
             _txtBranchCriterion = CreateSearchBox();
@@ -101,7 +110,8 @@ namespace GitUI.BranchTreePanel
                         { nameof(Images.ArrowUp), Pad(Images.ArrowUp) },
                         { nameof(Images.ArrowDown), Pad(Images.ArrowDown) },
                         { nameof(Images.FolderClosed), Pad(Images.FolderClosed) },
-                        { nameof(Images.BranchDocument), Pad(Images.BranchDocument) },
+                        { nameof(Images.BranchLocal), Pad(Images.BranchLocal) },
+                        { nameof(Images.BranchLocalMerged), Pad(Images.BranchLocalMerged) },
                         { nameof(Images.Branch), Pad(Images.Branch.AdaptLightness()) },
                         { nameof(Images.Remote), Pad(Images.Remote) },
                         { nameof(Images.BitBucket), Pad(Images.BitBucket) },
@@ -110,6 +120,7 @@ namespace GitUI.BranchTreePanel
                         { nameof(Images.BranchLocalRoot), Pad(Images.BranchLocalRoot) },
                         { nameof(Images.BranchRemoteRoot), Pad(Images.BranchRemoteRoot) },
                         { nameof(Images.BranchRemote), Pad(Images.BranchRemote) },
+                        { nameof(Images.BranchRemoteMerged), Pad(Images.BranchRemoteMerged) },
                         { nameof(Images.BranchFolder), Pad(Images.BranchFolder) },
                         { nameof(Images.TagHorizontal), Pad(Images.TagHorizontal) },
                         { nameof(Images.EyeOpened), Pad(Images.EyeOpened) },
@@ -219,14 +230,77 @@ namespace GitUI.BranchTreePanel
             }
         }
 
-        public void Initialize([CanBeNull]IAheadBehindDataProvider aheadBehindDataProvider, FilterBranchHelper filterBranchHelper)
+        public void Initialize([CanBeNull] IAheadBehindDataProvider aheadBehindDataProvider, FilterBranchHelper filterBranchHelper, ICheckRefs refsSource, IScriptHostControl scriptHost, IRunScript scriptRunner)
         {
             _aheadBehindDataProvider = aheadBehindDataProvider;
             _filterBranchHelper = filterBranchHelper;
+            _refsSource = refsSource;
+            _scriptHost = scriptHost;
+            _scriptRunner = scriptRunner;
 
             // This lazily sets the command source, invoking OnUICommandsSourceSet, which is required for setting up
             // notifications for each Tree.
             _ = UICommandsSource;
+        }
+
+        /// <summary>
+        /// Toggles filtering mode on or off to the git refs present in the left panel depending on the app's global filtering rules .
+        /// These rules include: show all branches / show current branch / show filtered branches, etc.
+        /// </summary>
+        /// <param name="isFiltering">
+        ///  <see langword="true"/>, if the data is being filtered; otherwise <see langword="false"/>.
+        /// </param>
+        public void ToggleFilterMode(bool isFiltering)
+        {
+            _branchesTree.ToggleFilterMode(isFiltering);
+            _remotesTree.ToggleFilterMode(isFiltering);
+            _tagTree.ToggleFilterMode(isFiltering);
+        }
+
+        public void SelectionChanged(IReadOnlyList<GitRevision> selectedRevisions)
+        {
+            // If we arrived here through the chain of events after selecting a node in the tree,
+            // and the selected revision is the one we have selected - do nothing.
+            if (selectedRevisions.Count == 1 && selectedRevisions[0].ObjectId == GetSelectedNodeObjectId(treeMain.SelectedNode))
+            {
+                return;
+            }
+
+            var cancellationToken = _selectionCancellationTokenSequence.Next();
+
+            GitRevision selectedRevision = selectedRevisions.FirstOrDefault();
+            string selectedGuid = selectedRevision?.IsArtificial ?? true ? "HEAD" : selectedRevision.Guid;
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                HashSet<string> mergedBranches = selectedGuid == null
+                    ? new HashSet<string>()
+                    : (await Module.GetMergedBranchesAsync(includeRemote: true, fullRefname: true, commit: selectedGuid)).ToHashSet();
+
+                selectedRevision?.Refs.ForEach(gitRef => mergedBranches.Remove(gitRef.CompleteName));
+
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+
+                try
+                {
+                    treeMain.BeginUpdate();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _branchesTree?.DepthEnumerator<BaseBranchLeafNode>().ForEach(node => node.IsMerged = mergedBranches.Contains(GitRefName.RefsHeadsPrefix + node.FullPath));
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _remotesTree?.DepthEnumerator<BaseBranchLeafNode>().ForEach(node => node.IsMerged = mergedBranches.Contains(GitRefName.RefsRemotesPrefix + node.FullPath));
+                }
+                finally
+                {
+                    treeMain.EndUpdate();
+                }
+            }).FileAndForget();
+
+            static ObjectId GetSelectedNodeObjectId(TreeNode treeNode)
+            {
+                // Local or remote branch nodes or tag nodes
+                return Node.GetNodeSafe<BaseBranchLeafNode>(treeNode)?.ObjectId ??
+                    Node.GetNodeSafe<TagNode>(treeNode)?.ObjectId;
+            }
         }
 
         protected override void OnUICommandsSourceSet(IGitUICommandsSource source)
@@ -258,7 +332,7 @@ namespace GitUI.BranchTreePanel
                 ImageKey = nameof(Images.BranchLocalRoot),
                 SelectedImageKey = nameof(Images.BranchLocalRoot),
             };
-            _branchesTree = new BranchTree(rootNode, UICommandsSource, _aheadBehindDataProvider);
+            _branchesTree = new BranchTree(rootNode, UICommandsSource, _aheadBehindDataProvider, _refsSource);
         }
 
         private void CreateRemotes()
@@ -269,7 +343,7 @@ namespace GitUI.BranchTreePanel
                 ImageKey = nameof(Images.BranchRemoteRoot),
                 SelectedImageKey = nameof(Images.BranchRemoteRoot),
             };
-            _remotesTree = new RemoteBranchTree(rootNode, UICommandsSource)
+            _remotesTree = new RemoteBranchTree(rootNode, UICommandsSource, _refsSource)
             {
                 TreeViewNode =
                 {
@@ -286,7 +360,7 @@ namespace GitUI.BranchTreePanel
                 ImageKey = nameof(Images.TagHorizontal),
                 SelectedImageKey = nameof(Images.TagHorizontal),
             };
-            _tagTree = new TagTree(rootNode, UICommandsSource);
+            _tagTree = new TagTree(rootNode, UICommandsSource, _refsSource);
         }
 
         private void CreateSubmodules()
@@ -496,7 +570,12 @@ namespace GitUI.BranchTreePanel
                 _repoObjectsTree = repoObjectsTree;
             }
 
+            public ContextMenuStrip BranchContextMenu => _repoObjectsTree.menuBranch;
+            public ContextMenuStrip RemoteContextMenu => _repoObjectsTree.menuRemote;
+            public ContextMenuStrip TagContextMenu => _repoObjectsTree.menuTag;
             public NativeTreeView TreeView => _repoObjectsTree.treeMain;
+
+            public void OnContextMenuOpening(object sender, CancelEventArgs e) => _repoObjectsTree.contextMenu_Opening(sender, e);
 
             public void ReorderTreeNode(TreeNode node, bool up)
             {

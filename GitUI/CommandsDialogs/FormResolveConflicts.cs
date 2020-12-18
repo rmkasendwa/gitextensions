@@ -10,8 +10,9 @@ using GitCommands.Config;
 using GitCommands.Git;
 using GitCommands.Utils;
 using GitExtUtils;
-using GitUI.CommandsDialogs.ResolveConflictsDialog;
+using GitUI.HelperDialogs;
 using GitUI.Hotkey;
+using Microsoft.WindowsAPICodePack.Dialogs;
 using ResourceManager;
 
 namespace GitUI.CommandsDialogs
@@ -42,8 +43,12 @@ namespace GitUI.CommandsDialogs
         private readonly TranslationString _fileCreatedLocallyAndRemotelyLong = new TranslationString("File {0} does not have a base revision." + Environment.NewLine + "A file with the same name has been created locally ({1}) and remotely ({2}) causing this conflict." + Environment.NewLine + Environment.NewLine + "Choose the file you want to keep, merge the files or delete the file?");
         private readonly TranslationString _fileDeletedLocallyAndModifiedRemotely = new TranslationString("The file has been deleted locally ({0}) and modified remotely ({1}). Choose to delete the file or keep the modified version.");
         private readonly TranslationString _fileDeletedLocallyAndModifiedRemotelyLong = new TranslationString("File {0} does not have a local revision." + Environment.NewLine + "The file has been deleted locally ({1}) but modified remotely ({2})." + Environment.NewLine + Environment.NewLine + "Choose to delete the file or keep the modified version.");
+        private readonly TranslationString _filesDeletedLocallyAndModifiedRemotelyLong = new TranslationString("{0} and {1} other out of {2} selected files do not have a local revision." + Environment.NewLine + "The files have been deleted locally, but modified remotely" + Environment.NewLine + Environment.NewLine + "Choose to delete the files or keep the modified versions.");
+        private readonly TranslationString _filesDeletedLocallyAndModifiedRemotelyLongNoOtherFilesSelected = new TranslationString("{0} and {1} other selected file(s) do not have a local revision." + Environment.NewLine + "The files have been deleted locally, but modified remotely" + Environment.NewLine + Environment.NewLine + "Choose to delete the files or keep the modified versions.");
         private readonly TranslationString _fileModifiedLocallyAndDeletedRemotely = new TranslationString("The file has been modified locally ({0}) and deleted remotely ({1}). Choose to delete the file or keep the modified version.");
         private readonly TranslationString _fileModifiedLocallyAndDeletedRemotelyLong = new TranslationString("File {0} does not have a remote revision." + Environment.NewLine + "The file has been modified locally ({1}) but deleted remotely ({2})." + Environment.NewLine + Environment.NewLine + "Choose to delete the file or keep the modified version.");
+        private readonly TranslationString _filesModifiedLocallyAndDeletedRemotelyLong = new TranslationString("{0} and {1} other out of {2} selected files do not have a remote revision." + Environment.NewLine + "The files have been modified locally, but deleted remotely." + Environment.NewLine + Environment.NewLine + "Choose to delete the files or keep the modified versions.");
+        private readonly TranslationString _filesModifiedLocallyAndDeletedRemotelyLongNoOtherFilesSelected = new TranslationString("{0} and {1} other selected file(s) do not have a remote revision." + Environment.NewLine + "The files have been modified locally, but deleted remotely." + Environment.NewLine + Environment.NewLine + "Choose to delete the files or keep the modified versions.");
         private readonly TranslationString _noBase = new TranslationString("no base");
         private readonly TranslationString _deleted = new TranslationString("deleted");
         private readonly TranslationString _chooseLocalButtonText = new TranslationString("Choose local");
@@ -51,6 +56,9 @@ namespace GitUI.CommandsDialogs
         private readonly TranslationString _deleteFileButtonText = new TranslationString("Delete file");
         private readonly TranslationString _keepModifiedButtonText = new TranslationString("Keep modified");
         private readonly TranslationString _keepBaseButtonText = new TranslationString("Keep base file");
+
+        private readonly TranslationString _solveMergeConflictApplyToAllCheckBoxText = new TranslationString("Apply to {0} and {1} other file(s)");
+        private readonly TranslationString _solveMergeConflictDialogCaption = new TranslationString("Solve merge conflict");
 
         private readonly TranslationString _conflictedFilesContextMenuText = new TranslationString("Solve");
         private readonly TranslationString _openMergeToolItemText = new TranslationString("Open in");
@@ -92,7 +100,24 @@ namespace GitUI.CommandsDialogs
         private readonly TranslationString _failureWhileSaveFile = new TranslationString("Save file failed.");
         #endregion
 
+        private enum ConflictResolutionPreference
+        {
+            None = 0,
+            KeepLocal = 1,
+            KeepRemote = 2,
+            KeepBase = 3
+        }
+
         private readonly IFullPathResolver _fullPathResolver;
+        private ConflictResolutionPreference _solveMergeConflictDialogResult;
+        private bool _solveMergeConflictApplyToAll;
+        private string _solveMergeConflictDialogCheckboxText;
+        private int _filesDeletedLocallyAndModifiedRemotelyCount;
+        private int _filesModifiedLocallyAndDeletedRemotelyCount;
+        private int _filesRemainedCount;
+        private int _filesDeletedLocallyAndModifiedRemotelySolved;
+        private int _filesModifiedLocallyAndDeletedRemotelySolved;
+        private int _conflictItemsCount;
 
         [Obsolete("For VS designer and translation test only. Do not remove.")]
         private FormResolveConflicts()
@@ -233,6 +258,8 @@ namespace GitUI.CommandsDialogs
 
                     Close();
                 }
+
+                LoadCustomMergetools();
             }
         }
 
@@ -268,6 +295,24 @@ namespace GitUI.CommandsDialogs
             return (path ?? "").ToNativePath();
         }
 
+        private void LoadCustomMergetools()
+        {
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                var tools = await Module.GetCustomDiffMergeTools(isDiff: false);
+                customMergetool.DropDown = null;
+                ContextMenuStrip customDiffToolDropDown = new ContextMenuStrip();
+                foreach (var tool in tools)
+                {
+                    var toolStripItem = new ToolStripMenuItem(tool) { Tag = tool };
+                    toolStripItem.Click += customMergetool_Click;
+                    customDiffToolDropDown.Items.Add(toolStripItem);
+                }
+
+                customMergetool.DropDown = customDiffToolDropDown;
+            }).FileAndForget();
+        }
+
         private readonly Dictionary<string, string> _mergeScripts = new Dictionary<string, string>
         {
             { ".doc", "merge-doc.js" },
@@ -287,17 +332,17 @@ namespace GitUI.CommandsDialogs
 
             try
             {
-                string extension = Path.GetExtension(fileName).ToLower();
+                string extension = PathUtil.GetExtension(fileName).ToLower();
                 if (extension.Length <= 1)
                 {
                     return false;
                 }
 
-                string dir = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "Diff-Scripts").EnsureTrailingPathSeparator();
+                string dir = PathUtil.Combine(Path.GetDirectoryName(Application.ExecutablePath), "Diff-Scripts").EnsureTrailingPathSeparator();
                 if (Directory.Exists(dir))
                 {
                     if (_mergeScripts.TryGetValue(extension, out var mergeScript) &&
-                        File.Exists(Path.Combine(dir, mergeScript)))
+                        File.Exists(PathUtil.Combine(dir, mergeScript)))
                     {
                         if (MessageBox.Show(this, string.Format(_uskUseCustomMergeScript.Text, mergeScript),
                                             _uskUseCustomMergeScriptCaption.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) ==
@@ -321,16 +366,13 @@ namespace GitUI.CommandsDialogs
         private void UseMergeWithScript(string fileName, string mergeScript, string baseFileName, string localFileName, string remoteFileName)
         {
             // get timestamp of file before merge. This is an extra check to verify if merge was successfully
-            DateTime lastWriteTimeBeforeMerge = DateTime.Now;
-            if (File.Exists(Path.Combine(Module.WorkingDir, fileName)))
-            {
-                lastWriteTimeBeforeMerge = File.GetLastWriteTime(_fullPathResolver.Resolve(fileName));
-            }
+            var filePath = _fullPathResolver.Resolve(fileName);
+            DateTime lastWriteTimeBeforeMerge = File.Exists(filePath) ? File.GetLastWriteTime(filePath) : DateTime.Now;
 
             var args = new ArgumentBuilder
             {
                 mergeScript.Quote(),
-                FixPath(_fullPathResolver.Resolve(fileName)).Quote(),
+                FixPath(filePath).Quote(),
                 FixPath(remoteFileName).Quote(),
                 FixPath(localFileName).Quote(),
                 FixPath(baseFileName).Quote()
@@ -339,14 +381,10 @@ namespace GitUI.CommandsDialogs
             new Executable("wscript", Module.WorkingDir).Start(args);
 
             if (MessageBox.Show(this, string.Format(_askMergeConflictSolvedAfterCustomMergeScript.Text,
-                FixPath(_fullPathResolver.Resolve(fileName))), _askMergeConflictSolvedCaption.Text,
+                FixPath(filePath)), _askMergeConflictSolvedCaption.Text,
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
-                DateTime lastWriteTimeAfterMerge = lastWriteTimeBeforeMerge;
-                if (File.Exists(_fullPathResolver.Resolve(fileName)))
-                {
-                    lastWriteTimeAfterMerge = File.GetLastWriteTime(_fullPathResolver.Resolve(fileName));
-                }
+                DateTime lastWriteTimeAfterMerge = File.Exists(filePath) ? File.GetLastWriteTime(filePath) : lastWriteTimeBeforeMerge;
 
                 // The file is not modified, do not stage file and present warning
                 if (lastWriteTimeBeforeMerge == lastWriteTimeAfterMerge)
@@ -383,6 +421,7 @@ namespace GitUI.CommandsDialogs
             {
                 case "kdiff3":
                 case "diffmerge":
+                case "smerge":
                     arguments = arguments.Replace("\"$BASE\"", "");
                     break;
                 case "tortoisemerge":
@@ -519,11 +558,8 @@ namespace GitUI.CommandsDialogs
                     arguments = arguments.Replace("$MERGED", item.Filename);
 
                     // get timestamp of file before merge. This is an extra check to verify if merge was successful
-                    DateTime lastWriteTimeBeforeMerge = DateTime.Now;
-                    if (File.Exists(_fullPathResolver.Resolve(item.Filename)))
-                    {
-                        lastWriteTimeBeforeMerge = File.GetLastWriteTime(_fullPathResolver.Resolve(item.Filename));
-                    }
+                    var filePath = _fullPathResolver.Resolve(item.Filename);
+                    DateTime lastWriteTimeBeforeMerge = File.Exists(filePath) ? File.GetLastWriteTime(filePath) : DateTime.Now;
 
                     GitUIPluginInterfaces.ExecutionResult res;
                     try
@@ -538,11 +574,7 @@ namespace GitUI.CommandsDialogs
                         return;
                     }
 
-                    DateTime lastWriteTimeAfterMerge = lastWriteTimeBeforeMerge;
-                    if (File.Exists(_fullPathResolver.Resolve(item.Filename)))
-                    {
-                        lastWriteTimeAfterMerge = File.GetLastWriteTime(_fullPathResolver.Resolve(item.Filename));
-                    }
+                    DateTime lastWriteTimeAfterMerge = File.Exists(filePath) ? File.GetLastWriteTime(filePath) : lastWriteTimeBeforeMerge;
 
                     // Check exitcode AND timestamp of the file. If exitcode is success and
                     // time timestamp is changed, we are pretty sure the merge was done.
@@ -727,6 +759,7 @@ namespace GitUI.CommandsDialogs
         private void SetAvailableCommands(bool enabled)
         {
             OpenMergetool.Enabled = enabled;
+            customMergetool.Enabled = enabled;
             openMergeToolBtn.Enabled = enabled;
             ContextOpenLocalWith.Enabled = enabled;
             ContextOpenRemoteWith.Enabled = enabled;
@@ -873,38 +906,100 @@ namespace GitUI.CommandsDialogs
             }
         }
 
+        private TaskDialog CreateSolveMergeConflictTaskDialog(IntPtr handle, string text, string instructionText, string caption, string applyToAllCheckBoxText,
+            string keepLocalButtonText, string keepRemoteButtonText, string keepBaseButtonText)
+        {
+            TaskDialog dialog = new TaskDialog
+            {
+                OwnerWindowHandle = handle,
+                Text = text,
+                InstructionText = instructionText,
+                Caption = caption,
+                StandardButtons = TaskDialogStandardButtons.Cancel,
+                Icon = TaskDialogStandardIcon.Error,
+                FooterCheckBoxText = applyToAllCheckBoxText,
+                FooterIcon = TaskDialogStandardIcon.Information,
+                StartupLocation = TaskDialogStartupLocation.CenterOwner,
+                Cancelable = true
+            };
+
+            // Local
+            var btnKeepLocal = new TaskDialogCommandLink("KeepLocal", null, keepLocalButtonText);
+            btnKeepLocal.Click += (s, e) =>
+            {
+                _solveMergeConflictDialogResult = ConflictResolutionPreference.KeepLocal;
+                dialog.Close();
+            };
+
+            // Remote
+            var btnKeepRemote = new TaskDialogCommandLink("KeepRemote", null, keepRemoteButtonText);
+            btnKeepRemote.Click += (s, e) =>
+            {
+                _solveMergeConflictDialogResult = ConflictResolutionPreference.KeepRemote;
+                dialog.Close();
+            };
+
+            // Base
+            var btnKeepBase = new TaskDialogCommandLink("KeepBase", null, keepBaseButtonText);
+            btnKeepBase.Click += (s, e) =>
+            {
+                _solveMergeConflictDialogResult = ConflictResolutionPreference.KeepBase;
+                dialog.Close();
+            };
+
+            dialog.Controls.Add(btnKeepLocal);
+            dialog.Controls.Add(btnKeepRemote);
+            dialog.Controls.Add(btnKeepBase);
+
+            return dialog;
+        }
+
+        private void OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction(Action<ConflictResolutionPreference> selectedMergeAction,
+            string dialogText, string dialogInstructionText, string dialogCaption, string dialogFooterCheckboxText,
+            string keepLocalButtonText, string keepRemoteButtonText, string keepBaseButtonText)
+        {
+            if (!_solveMergeConflictApplyToAll)
+            {
+                using var dialog = CreateSolveMergeConflictTaskDialog(Handle, dialogText, dialogInstructionText, dialogCaption, dialogFooterCheckboxText,
+                    keepLocalButtonText, keepRemoteButtonText, keepBaseButtonText);
+
+                dialog.Show();
+                _solveMergeConflictApplyToAll = dialog.FooterCheckBoxChecked ?? false;
+            }
+
+            selectedMergeAction(_solveMergeConflictDialogResult);
+        }
+
         private void BinaryFilesChooseLocalBaseRemote(ConflictData item)
         {
-            string caption = string.Format(_fileBinaryChooseLocalBaseRemote.Text,
-                                            item.Local.Filename,
-                                            GetLocalSideString(),
-                                            GetRemoteSideString());
-
-            using (var frm = new FormModifiedDeletedCreated(string.Format(_chooseLocalButtonText.Text + " ({0})", GetLocalSideString()),
-                                                                            string.Format(_chooseRemoteButtonText.Text + " ({0})", GetRemoteSideString()),
-                                                                            _keepBaseButtonText.Text,
-                                                                            caption))
-            {
-                frm.ShowDialog(this);
-
-                if (frm.KeepBase)
+            // solveMergeConflictDialogResult gets a value inside of the method "OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction"
+            OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction((solveMergeConflictDialogResult) =>
                 {
-                    // base
-                    ChooseBaseOnConflict(item.Filename);
-                }
-
-                if (frm.KeepLocal)
-                {
-                    // local
-                    ChooseLocalOnConflict(item.Filename);
-                }
-
-                if (frm.KeepRemote)
-                {
-                    // remote
-                    ChooseRemoteOnConflict(item.Filename);
-                }
-            }
+                    switch (solveMergeConflictDialogResult)
+                    {
+                        case ConflictResolutionPreference.KeepLocal:
+                            // local
+                            ChooseLocalOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepRemote:
+                            // remote
+                            ChooseRemoteOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepBase:
+                            // base
+                            ChooseBaseOnConflict(item.Filename);
+                            break;
+                        default:
+                            break;
+                    }
+                },
+                string.Format(_fileBinaryChooseLocalBaseRemote.Text, item.Local.Filename, GetLocalSideString(), GetRemoteSideString()),
+                string.Empty,
+                _solveMergeConflictDialogCaption.Text,
+                _solveMergeConflictDialogCheckboxText,
+                string.Format(_chooseLocalButtonText.Text + " ({0})", GetLocalSideString()),
+                string.Format(_chooseRemoteButtonText.Text + " ({0})", GetRemoteSideString()),
+                _keepBaseButtonText.Text);
         }
 
         private bool CheckForBaseRevision(ConflictData item)
@@ -914,41 +1009,39 @@ namespace GitUI.CommandsDialogs
                 return true;
             }
 
-            string caption = string.Format(_fileCreatedLocallyAndRemotelyLong.Text,
-                item.Filename,
-                GetLocalSideString(),
-                GetRemoteSideString());
-
-            using (var frm = new FormModifiedDeletedCreated(string.Format(_chooseLocalButtonText.Text + " ({0})", GetLocalSideString()),
-                string.Format(_chooseRemoteButtonText.Text + " ({0})", GetRemoteSideString()),
-                _deleteFileButtonText.Text,
-                caption))
-            {
-                frm.ShowDialog(this);
-
-                if (frm.KeepBase)
+            // solveMergeConflictDialogResult gets a value inside of the method "OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction"
+            OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction((solveMergeConflictDialogResult) =>
                 {
-                    // delete
-                    var args = new GitArgumentBuilder("rm")
+                    switch (solveMergeConflictDialogResult)
                     {
-                        "--",
-                        item.Filename.QuoteNE()
-                    };
-                    Module.GitExecutable.GetOutput(args);
-                }
-
-                if (frm.KeepLocal)
-                {
-                    // local
-                    ChooseLocalOnConflict(item.Filename);
-                }
-
-                if (frm.KeepRemote)
-                {
-                    // remote
-                    ChooseRemoteOnConflict(item.Filename);
-                }
-            }
+                        case ConflictResolutionPreference.KeepLocal:
+                            // local
+                            ChooseLocalOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepRemote:
+                            // remote
+                            ChooseRemoteOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepBase:
+                            // delete
+                            var args = new GitArgumentBuilder("rm")
+                            {
+                                "--",
+                                item.Filename.QuoteNE()
+                            };
+                            Module.GitExecutable.GetOutput(args);
+                            break;
+                        default:
+                            break;
+                    }
+                },
+                string.Format(_fileCreatedLocallyAndRemotelyLong.Text, item.Filename, GetLocalSideString(), GetRemoteSideString()),
+                string.Empty,
+                _solveMergeConflictDialogCaption.Text,
+                _solveMergeConflictDialogCheckboxText,
+                string.Format(_chooseLocalButtonText.Text + " ({0})", GetLocalSideString()),
+                string.Format(_chooseRemoteButtonText.Text + " ({0})", GetRemoteSideString()),
+                _deleteFileButtonText.Text);
 
             return false;
         }
@@ -960,41 +1053,63 @@ namespace GitUI.CommandsDialogs
                 return true;
             }
 
-            string caption = string.Format(_fileDeletedLocallyAndModifiedRemotelyLong.Text,
-                item.Filename,
-                GetLocalSideString(),
-                GetRemoteSideString());
-
-            using (var frm = new FormModifiedDeletedCreated(string.Format(_deleteFileButtonText.Text + " ({0})", GetLocalSideString()),
-                string.Format(_keepModifiedButtonText.Text + " ({0})", GetRemoteSideString()),
-                _keepBaseButtonText.Text,
-                caption))
+            string dialogText = "";
+            if (_solveMergeConflictApplyToAll == false && _filesDeletedLocallyAndModifiedRemotelySolved == 1)
             {
-                frm.ShowDialog(this);
+                dialogText = string.Format(_fileDeletedLocallyAndModifiedRemotelyLong.Text,
+                        item.Filename,
+                        GetLocalSideString(),
+                        GetRemoteSideString());
+            }
 
-                if (frm.KeepBase)
+            if (_solveMergeConflictApplyToAll == false && _filesDeletedLocallyAndModifiedRemotelySolved > 1)
+            {
+                if (_filesModifiedLocallyAndDeletedRemotelyCount == 0 && _filesRemainedCount == 0)
                 {
-                    // base
-                    ChooseBaseOnConflict(item.Filename);
+                    // Task Dialog shows the name of a current file, so the amount of the left files should be minus one. That's why _filesModifiedLocallyAndDeletedRemotelySolved - 1
+                    dialogText = string.Format(_filesDeletedLocallyAndModifiedRemotelyLongNoOtherFilesSelected.Text, item.Filename, _filesDeletedLocallyAndModifiedRemotelySolved - 1);
                 }
-
-                if (frm.KeepLocal)
+                else
                 {
-                    // delete
-                    var args = new GitArgumentBuilder("rm")
-                    {
-                        "--",
-                        item.Filename.QuoteNE()
-                    };
-                    Module.GitExecutable.GetOutput(args);
-                }
-
-                if (frm.KeepRemote)
-                {
-                    // remote
-                    ChooseRemoteOnConflict(item.Filename);
+                    dialogText = string.Format(_filesDeletedLocallyAndModifiedRemotelyLong.Text, item.Filename, _filesDeletedLocallyAndModifiedRemotelySolved - 1, _conflictItemsCount);
                 }
             }
+
+            // solveMergeConflictDialogResult gets a value inside of the method "OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction"
+            OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction((solveMergeConflictDialogResult) =>
+                {
+                    switch (solveMergeConflictDialogResult)
+                    {
+                        case ConflictResolutionPreference.KeepLocal:
+                            // delete
+                            var args = new GitArgumentBuilder("rm")
+                            {
+                                "--",
+                                item.Filename.QuoteNE()
+                            };
+                            Module.GitExecutable.GetOutput(args);
+                            break;
+                        case ConflictResolutionPreference.KeepRemote:
+                            // remote
+                            ChooseRemoteOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepBase:
+                            // base
+                            ChooseBaseOnConflict(item.Filename);
+                            break;
+                        default:
+                            break;
+                    }
+
+                    _filesDeletedLocallyAndModifiedRemotelySolved--;
+                },
+                dialogText,
+                string.Empty,
+                _solveMergeConflictDialogCaption.Text,
+                (_filesDeletedLocallyAndModifiedRemotelySolved > 1) ? string.Format(_solveMergeConflictApplyToAllCheckBoxText.Text, item.Filename, _filesDeletedLocallyAndModifiedRemotelySolved - 1) : string.Empty,
+                string.Format(_deleteFileButtonText.Text + " ({0})", GetLocalSideString()),
+                string.Format(_keepModifiedButtonText.Text + " ({0})", GetRemoteSideString()),
+                string.Format(_keepBaseButtonText.Text + " ({0})", GetLocalSideString()));
 
             return false;
         }
@@ -1006,41 +1121,63 @@ namespace GitUI.CommandsDialogs
                 return true;
             }
 
-            string caption = string.Format(_fileModifiedLocallyAndDeletedRemotelyLong.Text,
-                item.Filename,
-                GetLocalSideString(),
-                GetRemoteSideString());
-
-            using (var frm = new FormModifiedDeletedCreated(string.Format(_keepModifiedButtonText.Text + " ({0})", GetLocalSideString()),
-                string.Format(_deleteFileButtonText.Text + " ({0})", GetRemoteSideString()),
-                _keepBaseButtonText.Text,
-                caption))
+            string dialogText = "";
+            if (_solveMergeConflictApplyToAll == false && _filesModifiedLocallyAndDeletedRemotelySolved == 1)
             {
-                frm.ShowDialog(this);
+                dialogText = string.Format(_fileModifiedLocallyAndDeletedRemotelyLong.Text,
+                    item.Filename,
+                    GetLocalSideString(),
+                    GetRemoteSideString());
+            }
 
-                if (frm.KeepBase)
+            if (_solveMergeConflictApplyToAll == false && _filesModifiedLocallyAndDeletedRemotelySolved > 1)
+            {
+                if (_filesDeletedLocallyAndModifiedRemotelyCount == 0 && _filesRemainedCount == 0)
                 {
-                    // base
-                    ChooseBaseOnConflict(item.Filename);
+                    // Task Dialog shows the name of a current file, so the amount of the left files should be minus one. That's why _filesModifiedLocallyAndDeletedRemotelySolved - 1
+                    dialogText = string.Format(_filesModifiedLocallyAndDeletedRemotelyLongNoOtherFilesSelected.Text, item.Filename, _filesModifiedLocallyAndDeletedRemotelySolved - 1);
                 }
-
-                if (frm.KeepLocal)
+                else
                 {
-                    // delete
-                    ChooseLocalOnConflict(item.Filename);
-                }
-
-                if (frm.KeepRemote)
-                {
-                    // remote
-                    var args = new GitArgumentBuilder("rm")
-                    {
-                        "--",
-                        item.Filename.QuoteNE()
-                    };
-                    Module.GitExecutable.GetOutput(args);
+                    dialogText = string.Format(_filesModifiedLocallyAndDeletedRemotelyLong.Text, item.Filename, _filesModifiedLocallyAndDeletedRemotelySolved - 1, _conflictItemsCount);
                 }
             }
+
+            // solveMergeConflictDialogResult gets a value inside of the method "OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction"
+            OpenSolveMergeConflictDialogAndExecuteSelectedMergeAction((solveMergeConflictDialogResult) =>
+                {
+                    switch (solveMergeConflictDialogResult)
+                    {
+                        case ConflictResolutionPreference.KeepLocal:
+                            // delete
+                            ChooseLocalOnConflict(item.Filename);
+                            break;
+                        case ConflictResolutionPreference.KeepRemote:
+                            // remote
+                            var args = new GitArgumentBuilder("rm")
+                            {
+                                "--",
+                                item.Filename.QuoteNE()
+                            };
+                            Module.GitExecutable.GetOutput(args);
+                            break;
+                        case ConflictResolutionPreference.KeepBase:
+                            // base
+                            ChooseBaseOnConflict(item.Filename);
+                            break;
+                        default:
+                            break;
+                    }
+
+                    _filesModifiedLocallyAndDeletedRemotelySolved--;
+                },
+                dialogText,
+                string.Empty,
+                _solveMergeConflictDialogCaption.Text,
+                (_filesModifiedLocallyAndDeletedRemotelySolved > 1) ? string.Format(_solveMergeConflictApplyToAllCheckBoxText.Text, item.Filename, _filesModifiedLocallyAndDeletedRemotelySolved - 1) : string.Empty,
+                string.Format(_keepModifiedButtonText.Text + " ({0})", GetLocalSideString()),
+                string.Format(_deleteFileButtonText.Text + " ({0})", GetRemoteSideString()),
+                _keepBaseButtonText.Text);
 
             return false;
         }
@@ -1052,9 +1189,54 @@ namespace GitUI.CommandsDialogs
                 try
                 {
                     var items = GetConflicts();
+                    _conflictItemsCount = items.Count;
 
-                    StartProgressBarWithMaxValue(items.Count);
+                    List<ConflictData> filesDeletedLocallyAndModifiedRemotely = new List<ConflictData>();
+                    List<ConflictData> filesModifiedLocallyAndDeletedRemotely = new List<ConflictData>();
+                    List<ConflictData> filesRemaining = new List<ConflictData>();
+
+                    // Insert(0, conflictData) is needed the task dialog shows the same order of files as selected in the grid
                     foreach (var conflictData in items)
+                    {
+                        if (string.IsNullOrEmpty(conflictData.Local.Filename) && !string.IsNullOrEmpty(conflictData.Remote.Filename))
+                        {
+                            filesDeletedLocallyAndModifiedRemotely.Insert(0, conflictData);
+                        }
+                        else if (!string.IsNullOrEmpty(conflictData.Local.Filename) && string.IsNullOrEmpty(conflictData.Remote.Filename))
+                        {
+                            filesModifiedLocallyAndDeletedRemotely.Insert(0, conflictData);
+                        }
+                        else
+                        {
+                            filesRemaining.Insert(0, conflictData);
+                        }
+                    }
+
+                    _filesDeletedLocallyAndModifiedRemotelyCount = filesDeletedLocallyAndModifiedRemotely.Count;
+                    _filesModifiedLocallyAndDeletedRemotelyCount = filesModifiedLocallyAndDeletedRemotely.Count;
+                    _filesRemainedCount = filesRemaining.Count;
+                    _filesDeletedLocallyAndModifiedRemotelySolved = _filesDeletedLocallyAndModifiedRemotelyCount;
+                    _filesModifiedLocallyAndDeletedRemotelySolved = _filesModifiedLocallyAndDeletedRemotelyCount;
+
+                    StartProgressBarWithMaxValue(_conflictItemsCount);
+
+                    _solveMergeConflictApplyToAll = false;
+                    foreach (var conflictData in filesDeletedLocallyAndModifiedRemotely)
+                    {
+                        IncrementProgressBarValue();
+                        ResolveItemConflict(conflictData);
+                    }
+
+                    _solveMergeConflictApplyToAll = false;
+                    foreach (var conflictData in filesModifiedLocallyAndDeletedRemotely)
+                    {
+                        IncrementProgressBarValue();
+                        ResolveItemConflict(conflictData);
+                    }
+
+                    _solveMergeConflictDialogCheckboxText = string.Empty; // Hide checkbox "apply to all"
+                    _solveMergeConflictApplyToAll = false;
+                    foreach (var conflictData in filesRemaining)
                     {
                         IncrementProgressBarValue();
                         ResolveItemConflict(conflictData);
@@ -1062,6 +1244,7 @@ namespace GitUI.CommandsDialogs
                 }
                 finally
                 {
+                    _solveMergeConflictApplyToAll = false;
                     StopAndHideProgressBar();
                     Initialize();
                 }
@@ -1071,6 +1254,28 @@ namespace GitUI.CommandsDialogs
         private void OpenMergetool_Click(object sender, EventArgs e)
         {
             OpenMergeTool();
+        }
+
+        private void customMergetool_Click(object sender, EventArgs e)
+        {
+            if (sender == customMergetool)
+            {
+                // "main menu" clicked, cancel dropdown manually, invoke default mergetool
+                customMergetool.HideDropDown();
+                ConflictedFilesContextMenu.Hide();
+            }
+
+            using (WaitCursorScope.Enter())
+            {
+                string customTool = (sender as ToolStripMenuItem)?.Tag as string;
+
+                foreach (var item in GetConflicts())
+                {
+                    Directory.SetCurrentDirectory(Module.WorkingDir);
+                    Module.RunMergeTool(fileName: item.Filename, customTool: customTool);
+                    Initialize();
+                }
+            }
         }
 
         private void ContextOpenBaseWith_Click(object sender, EventArgs e)
@@ -1117,9 +1322,7 @@ namespace GitUI.CommandsDialogs
                     return;
                 }
 
-                System.Drawing.Point pt = ConflictedFiles.PointToClient(Cursor.Position);
-                DataGridView.HitTestInfo hti = ConflictedFiles.HitTest(pt.X, pt.Y);
-                int lastRow = hti.RowIndex;
+                int lastRow = e.RowIndex;
                 ConflictedFiles.ClearSelection();
                 if (lastRow >= 0 && ConflictedFiles.Rows.Count > lastRow)
                 {
@@ -1135,13 +1338,13 @@ namespace GitUI.CommandsDialogs
             using (WaitCursorScope.Enter())
             {
                 var conflictData = GetConflict();
-                string fileName = conflictData.Filename;
-                fileName = PathUtil.GetFileName(fileName);
+                string fileName = PathUtil.GetFileName(conflictData.Filename);
+                var initialDirectory = _fullPathResolver.Resolve(Path.GetDirectoryName(conflictData.Filename));
 
                 using (var fileDialog = new SaveFileDialog
                 {
                     FileName = fileName,
-                    InitialDirectory = _fullPathResolver.Resolve(Path.GetDirectoryName(conflictData.Filename)),
+                    InitialDirectory = initialDirectory,
                     AddExtension = true
                 })
                 {
@@ -1246,23 +1449,20 @@ namespace GitUI.CommandsDialogs
 
         private void StageFile(string filename)
         {
-            using (var form = new FormStatus(ProcessStart, string.Format(_stageFilename.Text, filename)))
+            var args = new GitArgumentBuilder("add")
             {
-                form.ShowDialogOnError(this);
+                "--",
+                filename.QuoteNE()
+            };
+            string output = Module.GitExecutable.GetOutput(args);
+
+            if (string.IsNullOrWhiteSpace(output))
+            {
+                return;
             }
 
-            void ProcessStart(FormStatus form)
-            {
-                form.AddMessageLine(string.Format(_stageFilename.Text, filename));
-                var args = new GitArgumentBuilder("add")
-                {
-                    "--",
-                    filename.QuoteNE()
-                };
-                string output = Module.GitExecutable.GetOutput(args);
-                form.AddMessageLine(output);
-                form.Done(isSuccess: string.IsNullOrWhiteSpace(output));
-            }
+            string text = string.Format(_stageFilename.Text, filename);
+            FormStatus.ShowErrorDialog(this, text, text, output);
         }
 
         private void merge_Click(object sender, EventArgs e)

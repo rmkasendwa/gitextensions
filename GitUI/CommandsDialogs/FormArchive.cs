@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using GitCommands;
 using GitUI.HelperDialogs;
+using GitUIPluginInterfaces;
 using ResourceManager;
 
 namespace GitUI.CommandsDialogs
@@ -140,9 +141,8 @@ namespace GitUI.CommandsDialogs
                 {
                     string format = GetSelectedOutputFormat() == OutputFormat.Zip ? "zip" : "tar";
 
-                    FormProcess.ShowDialog(this,
-                        string.Format("archive --format={0} {1} --output \"{2}\" {3}",
-                        format, revision, saveFileDialog.FileName, GetPathArgumentFromGui()));
+                    var arguments = string.Format("archive --format={0} {1} --output \"{2}\" {3}", format, revision, saveFileDialog.FileName, GetPathArgumentFromGui());
+                    FormProcess.ShowDialog(this, process: null, arguments, Module.WorkingDir, input: null, useDialogSettings: true);
                     Close();
                 }
             }
@@ -160,7 +160,7 @@ namespace GitUI.CommandsDialogs
             else if (checkboxRevisionFilter.Checked)
             {
                 // 1. get all changed (and not deleted files) from selected to current revision
-                var files = UICommands.Module.GetDiffFiles(DiffSelectedRevision?.Guid, SelectedRevision?.Guid, StagedStatus.None).Where(f => !f.IsDeleted);
+                var files = UICommands.Module.GetDiffFilesWithUntracked(DiffSelectedRevision?.Guid, SelectedRevision?.Guid, StagedStatus.None).Where(f => !f.IsDeleted);
 
                 // 2. wrap file names with ""
                 // 3. join together with space as separator

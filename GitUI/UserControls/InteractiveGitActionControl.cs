@@ -1,9 +1,11 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Windows.Forms;
-using GitCommands;
+using GitCommands.Git.Commands;
 using GitExtUtils.GitUI.Theming;
 using GitUI.CommandsDialogs;
 using GitUI.CommandsDialogs.BrowseDialog;
+using GitUI.HelperDialogs;
 using ResourceManager;
 
 namespace GitUI.UserControls
@@ -55,7 +57,17 @@ namespace GitUI.UserControls
                 return;
             }
 
-            bool hasConflicts = Module.InTheMiddleOfConflictedMerge();
+            bool hasConflicts;
+            try
+            {
+                hasConflicts = Module.InTheMiddleOfConflictedMerge();
+            }
+            catch (Win32Exception)
+            {
+                // This command can be executed seemingly in the background (selecting Browse),
+                // do not notify the user (this can occur if Git is upgraded)
+                hasConflicts = false;
+            }
 
             if (Module.InTheMiddleOfRebase())
             {
@@ -161,13 +173,13 @@ namespace GitUI.UserControls
             switch (_action)
             {
                 case GitAction.Rebase:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.ContinueRebaseCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.ContinueRebaseCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 case GitAction.Merge:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.ContinueMergeCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.ContinueMergeCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 case GitAction.Patch:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.ResolvedCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.ResolvedCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 default:
                     return;
@@ -186,13 +198,13 @@ namespace GitUI.UserControls
             switch (_action)
             {
                 case GitAction.Rebase:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.AbortRebaseCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.AbortRebaseCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 case GitAction.Merge:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.AbortMergeCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.AbortMergeCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 case GitAction.Patch:
-                    FormProcess.ShowDialog(Form, GitCommandHelpers.AbortCmd());
+                    FormProcess.ShowDialog(Form, process: null, arguments: GitCommandHelpers.AbortCmd(), Module.WorkingDir, input: null, useDialogSettings: true);
                     break;
                 default:
                     return;

@@ -2,6 +2,8 @@
 using System.Diagnostics;
 using System.Windows.Forms;
 using GitCommands;
+using GitCommands.Git.Commands;
+using GitUI.HelperDialogs;
 using GitUI.Script;
 using ResourceManager;
 
@@ -49,7 +51,8 @@ namespace GitUI.CommandsDialogs
                 ScriptManager.RunEventScripts(this, ScriptEvent.BeforeCheckout);
 
                 string command = GitCommandHelpers.CheckoutCmd(selectedObjectId.ToString(), Force.Checked ? LocalChangesAction.Reset : 0);
-                if (FormProcess.ShowDialog(this, command))
+                bool success = FormProcess.ShowDialog(this, process: null, arguments: command, Module.WorkingDir, input: null, useDialogSettings: true);
+                if (success)
                 {
                     if (selectedObjectId != checkedOutObjectId)
                     {

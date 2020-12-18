@@ -10,6 +10,7 @@ using GitCommands.Git;
 using GitCommands.Patches;
 using GitExtUtils.GitUI;
 using GitUIPluginInterfaces;
+using Microsoft.WindowsAPICodePack.Dialogs;
 using ResourceManager;
 
 namespace GitUI.CommandsDialogs
@@ -189,28 +190,29 @@ namespace GitUI.CommandsDialogs
                 // FileStatusList has no interface for both worktree<-index, index<-HEAD at the same time
                 // Must be handled when displaying
                 var headId = Module.RevParse("HEAD");
+                var headRev = new GitRevision(headId);
                 var indexRev = new GitRevision(ObjectId.IndexId)
                 {
                     ParentIds = new[] { headId }
                 };
-                var worktreeRev = new GitRevision(ObjectId.WorkTreeId)
+                var workTreeRev = new GitRevision(ObjectId.WorkTreeId)
                 {
                     ParentIds = new[] { ObjectId.IndexId }
                 };
                 var indexItems = gitItemStatuses.Where(item => item.Staged == StagedStatus.Index).ToList();
                 var workTreeItems = gitItemStatuses.Where(item => item.Staged != StagedStatus.Index).ToList();
-                Stashed.SetStashDiffs(worktreeRev, ResourceManager.Strings.Workspace, workTreeItems,
-                    indexRev, ResourceManager.Strings.Index, indexItems);
+                Stashed.SetStashDiffs(headRev, indexRev, ResourceManager.Strings.Index, indexItems, workTreeRev, ResourceManager.Strings.Workspace, workTreeItems);
             }
             else
             {
                 var firstId = Module.RevParse(gitStash.Name + "^");
                 var selectedId = Module.RevParse(gitStash.Name);
-                var selectedRev = selectedId == null ? null : new GitRevision(selectedId)
+                var firstRev = firstId == null ? null : new GitRevision(firstId);
+                var secondRev = selectedId == null ? null : new GitRevision(selectedId)
                 {
                     ParentIds = new[] { firstId }
                 };
-                Stashed.SetStashDiffs(selectedRev, gitItemStatuses);
+                Stashed.SetDiffs(firstRev, secondRev, gitItemStatuses);
             }
 
             Loading.Visible = false;
@@ -226,15 +228,8 @@ namespace GitUI.CommandsDialogs
 
         private void StashedSelectedIndexChanged(object sender, EventArgs e)
         {
-            GitItemStatus stashedItem = Stashed.SelectedItem;
-
+            View.ViewChangesAsync(Stashed.SelectedItem);
             EnablePartialStash();
-
-            using (WaitCursorScope.Enter())
-            {
-                // Special revision handling, see LoadGitItemStatuses()
-                View.ViewChangesAsync(null, Stashed.SelectedItemParent, stashedItem);
-            }
         }
 
         private void StashClick(object sender, EventArgs e)
@@ -264,7 +259,7 @@ namespace GitUI.CommandsDialogs
             using (WaitCursorScope.Enter())
             {
                 var msg = toolStripButton_customMessage.Checked ? " " + StashMessage.Text.Trim() : string.Empty;
-                UICommands.StashSave(this, chkIncludeUntrackedFiles.Checked, StashKeepIndex.Checked, msg, Stashed.SelectedItems.Select(i => i.Name).ToList());
+                UICommands.StashSave(this, chkIncludeUntrackedFiles.Checked, StashKeepIndex.Checked, msg, Stashed.SelectedItems.Select(i => i.Item.Name).ToList());
                 Initialize();
             }
         }
@@ -276,25 +271,28 @@ namespace GitUI.CommandsDialogs
                 var stashName = GetStashName();
                 if (AppSettings.StashConfirmDropShow)
                 {
-                    DialogResult res = PSTaskDialog.cTaskDialog.MessageBox(
-                        this,
-                        _stashDropConfirmTitle.Text,
-                        _cannotBeUndone.Text,
-                        _areYouSure.Text,
-                        "",
-                        "",
-                        _dontShowAgain.Text,
-                        PSTaskDialog.eTaskDialogButtons.OKCancel,
-                        PSTaskDialog.eSysIcons.Information,
-                        PSTaskDialog.eSysIcons.Information);
+                    using var dialog = new TaskDialog
+                    {
+                        OwnerWindowHandle = Handle,
+                        Text = _areYouSure.Text,
+                        Caption = _stashDropConfirmTitle.Text,
+                        InstructionText = _cannotBeUndone.Text,
+                        StandardButtons = TaskDialogStandardButtons.Yes | TaskDialogStandardButtons.No,
+                        Icon = TaskDialogStandardIcon.Information,
+                        FooterCheckBoxText = _dontShowAgain.Text,
+                        FooterIcon = TaskDialogStandardIcon.Information,
+                        StartupLocation = TaskDialogStartupLocation.CenterOwner,
+                    };
 
-                    if (res == DialogResult.OK)
+                    TaskDialogResult result = dialog.Show();
+
+                    if (result == TaskDialogResult.Yes)
                     {
                         UICommands.StashDrop(this, stashName);
                         Initialize();
                     }
 
-                    if (PSTaskDialog.cTaskDialog.VerificationChecked)
+                    if (dialog.FooterCheckBoxChecked == true)
                     {
                         AppSettings.StashConfirmDropShow = false;
                     }
